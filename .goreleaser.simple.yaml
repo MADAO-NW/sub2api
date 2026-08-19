@@ -25,6 +25,8 @@ builds:
       - -X main.Commit={{.Commit}}
       - -X main.Date={{.Date}}
       - -X main.BuildType=release
+      - -X main.UpdateRepository={{ .Env.UPDATE_REPOSITORY }}
+      - -X main.UpdateChannel={{ .Env.UPDATE_CHANNEL }}
 
 # 跳过 archives
 archives: []

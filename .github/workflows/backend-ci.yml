@@ -8,6 +8,17 @@ permissions:
   contents: read
 
 jobs:
+  fork-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check fork release scripts and configuration
+        run: |
+          bash -n deploy/install.sh
+          bash deploy/tests/install-github-token-test.sh
+          bash deploy/tests/install-release-channel-test.sh
+          bash deploy/tests/fork-release-config-test.sh
+
   shell:
     runs-on: macos-15
     steps:
