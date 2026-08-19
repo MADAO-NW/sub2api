@@ -22,10 +22,13 @@ describe('Prompt Audit API', () => {
   it('sends a temporary probe token only in the request and never invents response credentials', async () => {
     client.post.mockResolvedValue({ data: { ok: true, token_applied: true } })
     const result = await promptAuditAPI.probeEndpoint({
-      id: 'guard-1', name: 'Guard', protocol: 'openai_compatible', base_url: 'http://127.0.0.1:8000', model: 'guard',
-      token: 'api-canary-secret', clear_token: false, timeout_ms: 1000, input_limit: 1000, enabled: true, has_token: false, token_status: 'missing',
-    })
-    expect(client.post).toHaveBeenCalledWith('/admin/prompt-audit/endpoints/probe', expect.objectContaining({ endpoint: expect.objectContaining({ token: 'api-canary-secret' }) }))
+      id: 'guard-1', name: 'Guard', adapter: 'openai_compatible_qwen', protocol: 'openai_compatible', base_url: 'http://127.0.0.1:8000', model: 'guard',
+      token: 'api-canary-secret', clear_token: false, timeout_ms: 1000, enabled: true, has_token: false, token_status: 'missing',
+    }, 'draft audit prompt')
+    expect(client.post).toHaveBeenCalledWith('/admin/prompt-audit/endpoints/probe', expect.objectContaining({
+      audit_prompt: 'draft audit prompt',
+      endpoint: expect.objectContaining({ adapter: 'openai_compatible_qwen', token: 'api-canary-secret' }),
+    }))
     expect(JSON.stringify(result)).not.toContain('api-canary-secret')
   })
 

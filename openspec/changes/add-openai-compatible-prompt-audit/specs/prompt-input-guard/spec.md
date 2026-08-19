@@ -1,201 +1,156 @@
 ## ADDED Requirements
 
 ### Requirement: 同步提示词门禁必须由显式配置启用
-系统 SHALL 使用 `enabled` 与 `blocking_enabled` 表达关闭、异步只审计、同步审计并阻止三态。旧配置或缺失字段 MUST 归一为 `blocking_enabled=false`；系统 MUST 拒绝 `enabled=false && blocking_enabled=true` 的配置。
+系统 SHALL 使用 enabled 与 blocking_enabled 表达 off、async_audit 和 blocking。缺失 blocking_enabled 的旧配置 MUST 归一为 false；enabled=false 且 blocking_enabled=true MUST 被拒绝。
 
-#### Scenario: 关闭提示词审计
-- **WHEN** enabled=false
-- **THEN** 有效模式 MUST 为 off
-- **THEN** blocking_enabled MUST 被视为 false
-
-#### Scenario: 启用异步审计
+#### Scenario: 异步审计
 - **WHEN** enabled=true 且 blocking_enabled=false
-- **THEN** 有效模式 MUST 为 async_audit
-- **THEN** Guard 故障 MUST NOT 改变主请求结果
+- **THEN** 主请求 MUST 不等待模型分类
+- **THEN** DB、Redis 或模型故障 MUST 不改变客户端结果
 
-#### Scenario: 启用同步阻止
+#### Scenario: 同步阻止
 - **WHEN** enabled=true 且 blocking_enabled=true
-- **THEN** 有效模式 MUST 为 blocking
-- **THEN** 适用请求 MUST 等待 Guard 判定后才能进入账号选择、计费和上游阶段
+- **THEN** 请求 MUST 在账号选择、计费和上游前等待 ordered-all 结果
+- **THEN** 未达阻断门槛的 partial failure MUST fail-closed
 
-#### Scenario: 保存非法开关组合
-- **WHEN** 管理员保存 enabled=false 且 blocking_enabled=true
-- **THEN** 后端 MUST 返回 400 和 `prompt_guard_requires_audit_enabled`
+### Requirement: 安全审计协调器必须保持两个引擎独立
+Coordinator SHALL 把可信请求分别交给既有 Content Moderation 与 Prompt Audit，并使用稳定响应优先级。两者 MUST 不共用分类、事实表或副作用。
 
-### Requirement: 安全审计协调器必须保持两个引擎的独立语义
-系统 SHALL 通过一个薄协调器把可信请求上下文交给现有内容审核和新增提示词审计。协调器 MUST 不转换两套风险分类、不共用事件表、不让提示词审计触发内容审核副作用，并 MUST 使用确定性的阻断优先级。
+#### Scenario: 两个引擎同时 Block
+- **WHEN** Content Moderation 与 Prompt Guard 都阻断
+- **THEN** 客户端 MUST 继续收到既有 Content Moderation 响应
+- **THEN** Prompt Audit MUST 仍按独立 Job/Event/Outcome 规则记录
 
-#### Scenario: 现有内容审核阻断
-- **WHEN** 现有内容审核返回 Block
-- **THEN** 客户端 MUST 继续收到升级前的状态码、错误码和文案
-- **THEN** 提示词审计异步模式 MAY 继续完成自己的独立记录
-
-#### Scenario: 仅提示词 Guard 阻断
-- **WHEN** 现有内容审核允许但提示词 Guard 返回 Block
-- **THEN** 客户端 MUST 收到 `prompt_guard_blocked`
-
-#### Scenario: 两个引擎同时阻断
-- **WHEN** 两个引擎都返回 Block
-- **THEN** 现有内容审核错误语义 MUST 具有客户端响应优先级
-- **THEN** 两个引擎 MUST 各自记录其结果和结构化日志
+#### Scenario: 只有 Prompt Guard Block
+- **WHEN** 既有审核允许且 Prompt 聚合达到门槛
+- **THEN** 客户端 MUST 收到 403 prompt_guard_blocked
 
 ### Requirement: 同步门禁必须位于外部副作用之前
-系统 MUST 在鉴权和请求格式校验完成后、账号选择、账户并发、计费资格检查、任何预扣、上游连接和上游写入之前完成同步判定。被 Block 或 fail-closed 拒绝的请求 MUST 不产生这些下游副作用。
+系统 MUST 在鉴权、body limit 和基本协议校验之后，在账号选择、用户/账号并发 slot、计费资格、预扣、usage、上游连接/写入和 SSE 首字节之前完成同步结果。
 
-#### Scenario: HTTP 请求被 Guard 阻断
-- **WHEN** 任一支持的 HTTP 模型请求得到 Block
-- **THEN** 账号选择次数、计费检查/预扣次数和上游请求次数 MUST 均为 0
-- **THEN** 流式请求 MUST 在拒绝前未写出 SSE 响应头或首字节
+#### Scenario: Block 或 fail-closed
+- **WHEN** 同步结果为 Block、Unavailable 或 Invalid
+- **THEN** 账号选择、计费/预扣与上游调用次数 MUST 全部为 0
+- **THEN** SSE MUST 未发送 header 或任何字节
 
-#### Scenario: Guard 不可用
-- **WHEN** 同步模式下所有可用节点均失败
-- **THEN** 请求 MUST 在任何账号、计费或上游副作用之前返回 503
+### Requirement: 同步门禁必须覆盖所有用户文本入口
+系统 SHALL 覆盖现有 Content Moderation 已接入的 Chat Completions、Responses、Claude Messages、Gemini、Images/Grok 媒体文本入口和 Responses WebSocket 每轮 response.create，并通过结构测试防止旁路。
 
-### Requirement: 同步门禁必须覆盖所有目标协议入口
-系统 SHALL 覆盖现有内容审核已接入的所有用户文本入口，并通过结构测试防止后续路由绕过。至少包括 OpenAI Chat Completions、OpenAI Responses、Claude Messages、Gemini、OpenAI Images/Grok 媒体文本 prompt，以及 Responses WebSocket 首轮和后续轮次。
+#### Scenario: HTTP 协议入口
+- **WHEN** 任一受支持 HTTP 入口收到用户文本
+- **THEN** 系统 MUST 使用同一 PromptSnapshot 与 ordered-all evaluator
+- **THEN** 拒绝 MUST 使用该协议既有错误 envelope
 
-#### Scenario: OpenAI 兼容 HTTP 入口
-- **WHEN** 客户端调用 Chat Completions 或 Responses 兼容入口
-- **THEN** 系统 MUST 使用对应协议提取器并执行同一 Guard evaluator
-- **THEN** 现有 OpenAI 请求和响应 envelope MUST 保持兼容
+#### Scenario: WebSocket 后续轮次
+- **WHEN** 已建立 Responses WebSocket 后收到新的 response.create
+- **THEN** 系统 MUST 对本轮输入重新审核
+- **THEN** 前一轮结果 MUST NOT 复用于本轮
 
-#### Scenario: Claude 或 Gemini 入口
-- **WHEN** 客户端调用 Claude Messages 或 Gemini 入口
-- **THEN** 系统 MUST 执行相同策略判定
-- **THEN** 拒绝响应 MUST 使用该协议现有错误 envelope 和共享稳定 error_code
+### Requirement: 同步评估必须执行所有启用模型
+系统 SHALL 按 endpoint 数组顺序执行所有启用模型，并为每个模型使用独立 timeout_ms。模型顺序 MUST NOT 代表权重或故障切换优先级。
 
-#### Scenario: 新增用户文本入口
-- **WHEN** 后续代码新增一个可触发模型执行且包含用户文本的路由
-- **THEN** 路由覆盖门禁 MUST 在缺少安全审计接线时失败
+#### Scenario: 首模型已 Block
+- **WHEN** 首模型返回 Critical/Block
+- **THEN** evaluator MUST 继续调用所有后续启用模型
+- **THEN** 每个模型 MUST 在本 evaluation 中最多调用一次
 
-### Requirement: 同步分片必须共享总预算并完整覆盖
-系统 SHALL 以有序节点列表中首个启用节点的 timeout 作为一次同步 evaluation 的总预算。所有分片和节点故障切换 MUST 共享该 deadline；任一必要分片失败、超时或无合法结果时 MUST fail-closed。
+#### Scenario: 首模型失败
+- **WHEN** 首模型 error 或 timeout
+- **THEN** evaluator MUST 记录该模型错误并继续后续模型
+- **THEN** 后续模型 MUST 获得自己的完整 timeout
 
-#### Scenario: 所有分片均为安全
-- **WHEN** 每个非空分片都在总预算内返回 Safe 或允许的 Warn
-- **THEN** 请求 MAY 进入下一阶段
+#### Scenario: bulkhead 饱和
+- **WHEN** 全局或目标节点 bulkhead 无法接纳调用
+- **THEN** 该调用 MUST 快速形成稳定模型错误
+- **THEN** 系统 MUST 不无限等待
 
-#### Scenario: 中间分片阻断
-- **WHEN** 任一分片返回 Block
-- **THEN** evaluator MAY 立即早停
-- **THEN** 请求 MUST 被阻断且不得部分转发
+### Requirement: 同步聚合必须使用冻结模型数
+系统 SHALL 在 evaluation 开始时冻结 N、aggregation_strategy 和阻断门槛。error/timeout MUST 不缩小 N。
 
-#### Scenario: 最后一个必要分片失败
-- **WHEN** 前面分片安全但最后一个必要分片超时或响应无效
-- **THEN** 系统 MUST 返回 unavailable/invalid_response
-- **THEN** 系统 MUST NOT 根据部分结果放行
+#### Scenario: 任一阻断
+- **WHEN** aggregation_strategy=any_block 且至少一个有效结果 Block
+- **THEN** 最终 MUST Block
 
-### Requirement: 同步节点故障切换必须有序且 fail-closed
-系统 SHALL 按配置顺序尝试启用节点。连接失败、429、5xx 和超时 MAY 在总 deadline 尚有剩余时切换到下一节点；401/403、严格解析失败或耗尽节点 MUST 结束为不可用/非法响应。同步模式 MUST NOT 提供隐式 fail-open。
+#### Scenario: 多数阻断
+- **WHEN** aggregation_strategy=majority_block
+- **THEN** 只有 B>=floor(N/2)+1 时最终 Block
 
-#### Scenario: 首节点暂时失败而次节点成功
-- **WHEN** 首节点返回可重试错误且次节点在剩余预算内返回合法结果
-- **THEN** 系统 MUST 使用次节点结果
-- **THEN** failover 指标 MUST 增加
+#### Scenario: 全体阻断
+- **WHEN** aggregation_strategy=all_block
+- **THEN** 只有 N 个启用模型均有效 Block 时最终 Block
+- **THEN** 任一模型失败 MUST 使门槛未达并在同步模式 fail-closed
 
-#### Scenario: 认证失败
-- **WHEN** 节点返回 401 或 403
-- **THEN** 系统 MUST 视为不可重试配置错误
-- **THEN** 请求 MUST 返回 503 而不是按 Safe 放行
+#### Scenario: 达到门槛且部分失败
+- **WHEN** B 已达到门槛且仍有模型失败
+- **THEN** 最终 MUST Block
+- **THEN** 记录 MUST 标记 partial_failure=true
 
-#### Scenario: 所有节点容量饱和
-- **WHEN** 全局或每节点 bulkhead 均无法接受 evaluation
-- **THEN** 系统 MUST 快速返回 `prompt_guard_unavailable`
-- **THEN** 系统 MUST 不无限排队
+#### Scenario: 未达门槛且部分失败
+- **WHEN** B 未达门槛且至少一个模型失败
+- **THEN** 同步请求 MUST 返回 prompt_guard_unavailable 或 prompt_guard_invalid_response
+- **THEN** 系统 MUST NOT 按 Warn 部分放行
 
-### Requirement: HTTP 拒绝必须保持协议兼容和稳定错误码
-同步 Guard MUST 使用现有 Handler 的协议错误构造器和最小扩展，且只向客户端暴露通用消息、稳定 Prompt Guard code/reason 和 request ID。OpenAI/Claude MUST 在 error 对象的可选 `code` 字段携带稳定代码并保留原合法 type；Gemini MUST 保留数值 `error.code` 与 canonical status，并在 `google.rpc.ErrorInfo.reason` 携带稳定代码。响应 MUST 不包含风险正文、类别细节、内部节点地址或凭据。
+### Requirement: 同步结果必须先记录且不得重复扫描
+系统 SHALL 把一次 evaluation 的聚合结果与每模型明细交给 RecordBlocking。记录路径 MUST NOT 再调用模型；一次成功分类 MUST 写唯一 Outcome，并按 store_pass_events 决定 Event。
+
+#### Scenario: 同步 Block
+- **WHEN** evaluator 得到 Block
+- **THEN** RecordBlocking MUST 在一个事务中写 done Job、可选 Event、Outcome、State/Action
+- **THEN** 模型调用次数 MUST 不因记录而增加
+
+#### Scenario: 记录失败
+- **WHEN** 已确定同步结果但数据库记录失败
+- **THEN** 系统 MUST 记录 prompt_guard.result_record_failed
+- **THEN** 已确定 Allow/Block MUST 不被反转
+
+### Requirement: HTTP 与 WebSocket 拒绝必须保持协议兼容
+同步 Guard MUST 只暴露稳定 code/reason、通用消息和 request ID。响应 MUST 不包含 Prompt、类别详情、模型结果、节点地址或凭据。
 
 #### Scenario: HTTP Block
-- **WHEN** 同步 Guard 判定为 Block
-- **THEN** HTTP 状态 MUST 为 403
-- **THEN** error_code MUST 为 `prompt_guard_blocked`
+- **WHEN** 最终 Block
+- **THEN** HTTP 状态 MUST 为 403 且 code 为 prompt_guard_blocked
 
-#### Scenario: Gemini HTTP Block
-- **WHEN** Gemini 入口的同步 Guard 判定为 Block
-- **THEN** Google error envelope 的 `error.code` MUST 保持数值 403 且 status MUST 为对应 canonical status
-- **THEN** `error.details` 中 ErrorInfo reason MUST 为 `prompt_guard_blocked`
-
-#### Scenario: HTTP Guard 不可用
-- **WHEN** 节点超时、连接失败、熔断或容量不足
+#### Scenario: HTTP partial/all failure
+- **WHEN** 未达到门槛且存在模型错误，或所有模型失败
 - **THEN** HTTP 状态 MUST 为 503
-- **THEN** error_code MUST 为 `prompt_guard_unavailable`
+- **THEN** code MUST 按错误类型为 prompt_guard_unavailable 或 prompt_guard_invalid_response
 
-#### Scenario: HTTP Guard 响应非法
-- **WHEN** Guard 输出无法严格解析
-- **THEN** HTTP 状态 MUST 为 503
-- **THEN** error_code MUST 为 `prompt_guard_invalid_response`
+#### Scenario: Gemini Block
+- **WHEN** Gemini 入口 Block
+- **THEN** Google envelope 的 error.code MUST 保持数值 403
+- **THEN** ErrorInfo.reason MUST 为 prompt_guard_blocked
 
-### Requirement: Responses WebSocket 必须对每个 response.create 执行门禁
-系统 SHALL 在 WebSocket 首次和后续每个 `response.create` 帧进入本轮用户/账号并发、计费和上游发送之前执行同步 Guard。一次安全结果 MUST NOT 被复用于不同的后续帧。
+#### Scenario: WebSocket 拒绝
+- **WHEN** response.create 被 Block
+- **THEN** close code MUST 为 4403，reason 为 prompt_guard_blocked
+- **WHEN** 结果 Unavailable/Invalid
+- **THEN** close code MUST 为 1013，并使用对应稳定 reason
 
-#### Scenario: 首轮 Block
-- **WHEN** 首个 response.create 被判定为 Block
-- **THEN** 服务端 MUST 不建立本轮上游请求或计费记录
-- **THEN** 服务端 MUST 使用 close code 4403 和 reason `prompt_guard_blocked` 关闭连接
+### Requirement: 配置必须以版本化顺序快照发布
+系统 SHALL 使用 config_version CAS 保存完整配置，保存成功后原子安装本实例快照并发布只含版本的 Redis invalidation。快照 MUST 保留 endpoint 顺序、adapter、独立 timeout、audit_prompt hash、协议版本和聚合门槛。
 
-#### Scenario: 后续轮次 Block
-- **WHEN** 已建立连接的后续 response.create 被判定为 Block
-- **THEN** 该帧 MUST 不发送给上游且不得创建本轮计费记录
-- **THEN** 服务端 MUST 使用 4403 关闭连接并记录 stage=subsequent_turn
+#### Scenario: 并发管理员保存
+- **WHEN** 第二个保存仍携带旧 expected_config_version
+- **THEN** 后端 MUST 返回 409 prompt_audit_config_conflict
+- **THEN** 不得覆盖已提交配置或重排 endpoint
 
-#### Scenario: WebSocket Guard 不可用
-- **WHEN** 首轮或后续轮次 Guard 不可用或响应非法
-- **THEN** 服务端 MUST 使用 close code 1013
-- **THEN** reason MUST 为 `prompt_guard_unavailable` 或 `prompt_guard_invalid_response`
+#### Scenario: 冷启动无有效快照
+- **WHEN** 已知 blocking 期望开启但配置无法加载
+- **THEN** 适用请求 MUST fail-closed
+- **THEN** Runtime MUST 显示 degraded/error，而不是 off/healthy
 
-### Requirement: 同步结果必须复用到脱敏事件且不得重复扫描
-系统 SHALL 在一次同步 evaluation 后把已得到的归一化结果交给独立记录路径。记录路径 MUST NOT 重新调用 Guard，也 MUST NOT 需要完整提示词正文；同步结果最多对应一个任务事实和一个按存储策略决定的事件。
+### Requirement: 单账号自动停用必须在提交后失效鉴权缓存
+同步和异步完成事务 SHALL 在实际把普通用户从 active 更新为 disabled 后返回该 user ID，并在事务提交后复用既有鉴权缓存失效端口。
 
-#### Scenario: 同步 Block 被记录
-- **WHEN** evaluator 已得到 Block
-- **THEN** 系统 MUST 用脱敏快照和既有结果创建 done 任务及风险事件
-- **THEN** Guard 调用次数 MUST 等于 evaluation 实际需要的节点/分片次数，而不是因记录而增加
-
-#### Scenario: 同步 Allow 且不保存 Pass
-- **WHEN** evaluator 得到 Allow 且 store_pass_events=false
-- **THEN** 系统 MAY 只保存任务/指标而不创建 Pass 事件
-
-### Requirement: 配置必须以版本化快照发布到请求热路径
-系统 SHALL 为提示词审计配置维护单调递增 config_version、updated_at、updated_by 和 change_summary。保存后 MUST 原子替换本实例快照并通过 Redis 发布失效通知；请求热路径 MUST 读取内存快照而不是逐请求查询数据库。
-
-#### Scenario: 多实例收到配置更新
-- **WHEN** 管理员成功保存新配置
-- **THEN** 保存实例 MUST 立即安装新版本并发布 Redis 失效通知
-- **THEN** 其他实例 MUST 重新加载并原子替换快照
-
-#### Scenario: 两个管理员并发保存配置
-- **WHEN** 两个保存请求携带相同 expected_config_version 且第一个已提交新版本
-- **THEN** 第二个请求 MUST 返回 409 `prompt_audit_config_conflict`
-- **THEN** 第二个请求 MUST NOT 静默覆盖第一个请求或复用相同 config_version
-
-#### Scenario: Redis 通知不可用
-- **WHEN** 配置已保存但 Redis publish 失败
-- **THEN** 系统 MUST 记录 `prompt_guard.config_reload_degraded`
-- **THEN** 其他实例 MUST 通过有界 TTL 刷新最终获得新版本
-
-#### Scenario: 冷启动无法加载严格配置
-- **WHEN** 实例冷启动且无法获得有效配置快照
-- **THEN** 对已知要求同步阻止的适用请求 MUST fail-closed
-- **THEN** 运行态 MUST 暴露配置加载错误
+#### Scenario: 自动停用已提交
+- **WHEN** 条件更新 users.status 成功
+- **THEN** 当前 API Key 的后续鉴权 MUST 不再继续使用旧 active 缓存
+- **THEN** 邮件失败 MUST 不恢复用户状态
 
 ### Requirement: Guard 关键路径必须可观测且不得泄密
-系统 SHALL 输出稳定结构化事件并提供计数/耗时指标。日志至少 MUST 覆盖配置更新/加载/降级、evaluation 开始、Allow、Block、失败、结果记录失败、异步投递/丢弃、Worker 处理/重试/失败、逐分片开始/完成/失败、分片聚合和滞留回收。
+系统 SHALL 输出稳定结构化事件和总体/每模型/evaluation 指标。日志 MUST 允许聚合策略、模型数、门槛和 partial_failure，但 MUST 禁止 input_limit、Prompt、audit_prompt、固定协议全文、Token、Authorization、完整 Base URL/query 与模型完整响应。
 
-#### Scenario: 同步请求被阻断
-- **WHEN** Guard 阻断一个请求
-- **THEN** 日志 MUST 包含 request_id、user_id、api_key_id、group_id、protocol、endpoint、model、config_version、guard_endpoint_id、decision、action、chunk_total、latency_ms、status 和 error_code
-- **THEN** 日志 MUST 明确包含 `upstream_dispatched=false` 和 `billing_preconsumed=false` 或目标项目等价字段
-
-#### Scenario: 检查日志敏感字段
-- **WHEN** 测试捕获提示词审计日志
-- **THEN** 日志中 MUST 不包含原始提示词、API Key、Authorization、完整 Guard URL query 或 Redis 载荷
-
-### Requirement: 禁用或回滚同步阻止必须即时恢复异步行为
-系统 SHALL 支持仅通过关闭 blocking_enabled 回到异步只审计，无需删除表、清空历史事件或停止现有内容审核。
-
-#### Scenario: 管理员关闭同步阻止
-- **WHEN** blocking_enabled 从 true 保存为 false 且新配置已生效
-- **THEN** 后续适用请求 MUST 不再等待 Guard 同步结果
-- **THEN** enabled=true 时后续请求 MUST 改为异步投递
-- **THEN** 历史任务和事件 MUST 保留
+#### Scenario: 同步阻断日志
+- **WHEN** 请求被 Prompt Guard Block
+- **THEN** 日志 MUST 包含可关联 ID、config_version、decision/action、模型数、门槛、partial_failure、latency 和稳定 error_code
+- **THEN** 日志 MUST 明确 upstream_dispatched=false 与 billing_preconsumed=false

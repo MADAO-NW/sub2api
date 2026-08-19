@@ -1,15 +1,17 @@
 export type PromptAuditMode = 'off' | 'async_audit' | 'blocking'
 export type PromptDecision = 'pass' | 'flag' | 'critical'
 export type PromptRiskLevel = 'low' | 'medium' | 'high' | 'critical'
+export type PromptAuditAdapter = 'qwen3guard' | 'openai_compatible_qwen'
+export type PromptAggregationStrategy = 'any_block' | 'majority_block' | 'all_block'
 
 export interface PromptAuditEndpoint {
   id: string
   name: string
+  adapter: PromptAuditAdapter
   protocol: 'openai_compatible'
   base_url: string
   model: string
   timeout_ms: number
-  input_limit: number
   enabled: boolean
   has_token: boolean
   token_status: 'configured' | 'missing' | 'invalid' | string
@@ -20,19 +22,50 @@ export interface PromptAuditEndpointDraft extends PromptAuditEndpoint {
   clear_token: boolean
 }
 
+export interface PromptNotificationConfig {
+  admin_email: string
+}
+
+export interface PromptEmailWarningConfig {
+  enabled: boolean
+  rule_revision: number
+  lookback_count: number
+  violation_threshold: number
+}
+
+export interface PromptAccountDisableConfig {
+  enabled: boolean
+  violation_threshold: number
+}
+
+export interface PromptEnforcementConfig {
+  email_warning: PromptEmailWarningConfig
+  account_disable: PromptAccountDisableConfig
+}
+
+export interface PromptContract {
+  version: string
+  fixed_output_prompt: string
+}
+
 export interface PromptAuditConfig {
   enabled: boolean
   blocking_enabled: boolean
   blocking_latest_turn_only: boolean
   store_pass_events: boolean
   effective_mode: PromptAuditMode
-  strategy: 'priority'
+  strategy: 'ordered_all'
+  aggregation_strategy: PromptAggregationStrategy
+  audit_prompt: string
   worker_count: number
   queue_capacity: number
   scanners: string[]
   all_groups: boolean
   group_ids: number[]
+  notifications: PromptNotificationConfig
+  enforcement: PromptEnforcementConfig
   endpoints: PromptAuditEndpoint[]
+  prompt_contract: PromptContract
   config_version: number
   updated_at: string
   updated_by: number
@@ -49,22 +82,29 @@ export interface PromptAuditUpdateRequest {
   blocking_enabled: boolean
   blocking_latest_turn_only: boolean
   store_pass_events: boolean
-  strategy: 'priority'
+  strategy: 'ordered_all'
+  aggregation_strategy: PromptAggregationStrategy
+  audit_prompt: string
   worker_count: number
   queue_capacity: number
   scanners: string[]
   all_groups: boolean
   group_ids: number[]
+  notifications: PromptNotificationConfig
+  enforcement: {
+    email_warning: Omit<PromptEmailWarningConfig, 'rule_revision'>
+    account_disable: PromptAccountDisableConfig
+  }
   endpoints: Array<{
     id: string
     name: string
+    adapter: PromptAuditAdapter
     protocol: 'openai_compatible'
     base_url: string
     model: string
     token?: string
     clear_token: boolean
     timeout_ms: number
-    input_limit: number
     enabled: boolean
   }>
 }
@@ -131,7 +171,47 @@ export interface PromptAuditRuntime {
   database_status: string
   redis_status: string
   endpoints: Record<string, PromptProbeResult>
+  models: Array<{
+    sequence: number
+    id: string
+    name: string
+    adapter: PromptAuditAdapter
+    model: string
+    enabled: boolean
+    timeout_ms: number
+    probe?: PromptProbeResult
+    metrics: {
+      requests: number
+      pass: number
+      flag: number
+      critical: number
+      errors: number
+      input_tokens: number
+      output_tokens: number
+      reasoning_tokens: number
+      latency_p50_ms: number
+      latency_p95_ms: number
+    }
+  }>
+  aggregation_strategy: PromptAggregationStrategy
+  enabled_model_count: number
+  block_threshold: number
+  prompt_contract_version: string
+  audit_prompt_hash: string
   guard_metrics: PromptGuardMetrics
+  evaluation_metrics: {
+    total: number
+    partial_failure: number
+    latency_p50_ms: number
+    latency_p95_ms: number
+  }
+  enforcement: {
+    outcomes_total: number
+    violations_total: number
+    warnings_total: number
+    disabled_total: number
+    mail_failures_total: number
+  }
 }
 
 export interface PromptSnapshot {
@@ -191,6 +271,32 @@ export interface PromptAuditEvent {
   config_version: number
   chunk_total: number
   latency_ms: number
+  model_results: {
+    aggregation: {
+      strategy: PromptAggregationStrategy
+      enabled_model_count: number
+      block_threshold: number
+      config_version: number
+      prompt_contract_version: string
+      audit_prompt_hash: string
+      partial_failure: boolean
+    }
+    models: Array<{
+      sequence: number
+      endpoint_id: string
+      adapter: PromptAuditAdapter
+      model: string
+      safety: string
+      categories: string[]
+      decision?: PromptDecision
+      action?: 'Allow' | 'Warn' | 'Block'
+      latency_ms: number
+      input_tokens?: number
+      output_tokens?: number
+      reasoning_tokens?: number
+      error_code: string
+    }>
+  }
   issue_summaries: PromptIssueSummary[]
   created_at: string
 }

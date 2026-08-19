@@ -334,11 +334,30 @@ func (m *ConfigManager) buildNextStorage(current storageConfig, req UpdateConfig
 	for _, endpoint := range current.Endpoints {
 		currentByID[endpoint.ID] = endpoint
 	}
+	emailRuleRevision := current.Enforcement.EmailWarning.RuleRevision
+	if emailRuleRevision < 1 {
+		emailRuleRevision = 1
+	}
+	if current.Enforcement.EmailWarning.Enabled != req.Enforcement.EmailWarning.Enabled ||
+		current.Enforcement.EmailWarning.LookbackCount != req.Enforcement.EmailWarning.LookbackCount ||
+		current.Enforcement.EmailWarning.ViolationThreshold != req.Enforcement.EmailWarning.ViolationThreshold {
+		emailRuleRevision++
+	}
 	next := storageConfig{
 		Enabled: req.Enabled, BlockingEnabled: req.BlockingEnabled, BlockingLatestTurnOnly: req.BlockingLatestTurnOnly, StorePassEvents: req.StorePassEvents,
-		Strategy: strings.TrimSpace(req.Strategy), WorkerCount: req.WorkerCount,
+		Strategy: strings.TrimSpace(req.Strategy), AggregationStrategy: strings.TrimSpace(req.AggregationStrategy),
+		AuditPrompt: req.AuditPrompt, WorkerCount: req.WorkerCount,
 		QueueCapacity: req.QueueCapacity, Scanners: append([]string(nil), req.Scanners...),
 		AllGroups: req.AllGroups, GroupIDs: append([]int64(nil), req.GroupIDs...),
+		Notifications: NotificationConfig{AdminEmail: strings.TrimSpace(req.Notifications.AdminEmail)},
+		Enforcement: EnforcementConfig{
+			EmailWarning: EmailWarningConfig{
+				Enabled: req.Enforcement.EmailWarning.Enabled, RuleRevision: emailRuleRevision,
+				LookbackCount:      req.Enforcement.EmailWarning.LookbackCount,
+				ViolationThreshold: req.Enforcement.EmailWarning.ViolationThreshold,
+			},
+			AccountDisable: req.Enforcement.AccountDisable,
+		},
 		ConfigVersion: current.ConfigVersion, UpdatedBy: actorID,
 		Endpoints: make([]StorageEndpoint, 0, len(req.Endpoints)),
 	}
@@ -349,8 +368,9 @@ func (m *ConfigManager) buildNextStorage(current storageConfig, req UpdateConfig
 		}
 		stored := StorageEndpoint{
 			ID: strings.TrimSpace(endpoint.ID), Name: strings.TrimSpace(endpoint.Name),
-			Protocol: strings.TrimSpace(endpoint.Protocol), BaseURL: baseURL, Model: strings.TrimSpace(endpoint.Model),
-			TimeoutMS: endpoint.TimeoutMS, InputLimit: endpoint.InputLimit, Enabled: endpoint.Enabled,
+			Adapter: strings.TrimSpace(endpoint.Adapter), Protocol: strings.TrimSpace(endpoint.Protocol),
+			BaseURL: baseURL, Model: strings.TrimSpace(endpoint.Model),
+			TimeoutMS: endpoint.TimeoutMS, Enabled: endpoint.Enabled,
 		}
 		old, hadOld := currentByID[stored.ID]
 		switch {

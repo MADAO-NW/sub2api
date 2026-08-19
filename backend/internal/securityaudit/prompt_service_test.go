@@ -46,6 +46,8 @@ func TestPromptServiceHasExplicitIdempotentLifecycle(t *testing.T) {
 		NewRedisPayloadStore(nil),
 		NewOpenAICompatibleScanner(),
 		NewAtomicMetrics(),
+		nil,
+		nil,
 	)
 
 	require.Nil(t, service.cancel, "construction must not start background work")
@@ -77,14 +79,15 @@ func TestPromptServiceBlockingLatestTurnOnlyUsesNarrowSnapshot(t *testing.T) {
 	service := &PromptService{
 		config: &fakeConfigStore{active: true, cfg: ActiveConfig{
 			RiskControlEnabled: true, Enabled: true, BlockingEnabled: true, BlockingLatestTurnOnly: true, AllGroups: true,
-			Scanners: AllScannerIDs, Endpoints: []ActiveEndpoint{{ID: "guard-1", Enabled: true, TimeoutMS: 1000, InputLimit: 4096}},
+			Strategy: StrategyOrderedAll, AggregationStrategy: AggregationAnyBlock,
+			Scanners: AllScannerIDs, Endpoints: []ActiveEndpoint{{ID: "guard-1", Adapter: AdapterQwen3Guard, Enabled: true, TimeoutMS: 1000}},
 		}},
 		evaluator: evaluator,
 	}
 	decision, err := service.Evaluate(context.Background(), Request{Protocol: "openai_chat_completions", Body: []byte(`{"messages":[{"role":"system","content":"system instruction"},{"role":"user","content":"older user input"},{"role":"assistant","content":"previous output"},{"role":"user","content":"latest user input"}]}`)})
 	require.NoError(t, err)
 	require.Equal(t, DecisionAllow, decision.Kind)
-	require.Equal(t, []string{"latest user input", "previous output"}, seen)
+	require.Equal(t, []string{"latest user input\n\nprevious output"}, seen)
 }
 
 func TestPromptServiceRejectsInvalidDeleteConfirmationClaims(t *testing.T) {

@@ -31,7 +31,7 @@ func (s *RedisPayloadStore) Set(ctx context.Context, jobID int64, scanText strin
 	if jobID <= 0 || scanText == "" {
 		return fmt.Errorf("prompt audit payload input invalid")
 	}
-	if ttl <= 0 || ttl > DefaultPayloadTTL {
+	if ttl <= 0 {
 		ttl = DefaultPayloadTTL
 	}
 	return s.client.Set(ctx, payloadKey(jobID), scanText, ttl).Err()

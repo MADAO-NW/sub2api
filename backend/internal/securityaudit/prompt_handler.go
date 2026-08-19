@@ -226,12 +226,32 @@ func configAuditFields(request UpdateConfigRequest, saved *PublicConfig) map[str
 	if saved != nil {
 		version = saved.ConfigVersion
 	}
+	enabledModelCount := 0
+	thirdPartyModelCount := 0
+	for _, endpoint := range request.Endpoints {
+		if !endpoint.Enabled {
+			continue
+		}
+		enabledModelCount++
+		if endpoint.Adapter == AdapterOpenAICompatibleQwen {
+			thirdPartyModelCount++
+		}
+	}
 	return map[string]any{
 		"enabled": request.Enabled, "blocking_enabled": request.BlockingEnabled,
 		"blocking_latest_turn_only": request.BlockingLatestTurnOnly,
 		"config_version":            version, "endpoint_count": len(request.Endpoints),
-		"scanner_count": len(request.Scanners), "all_groups": request.AllGroups,
-		"group_count": len(request.GroupIDs),
+		"enabled_model_count": enabledModelCount, "third_party_model_count": thirdPartyModelCount,
+		"aggregation_strategy":    request.AggregationStrategy,
+		"audit_prompt_configured": strings.TrimSpace(request.AuditPrompt) != "",
+		"scanner_count":           len(request.Scanners), "all_groups": request.AllGroups,
+		"group_count":                  len(request.GroupIDs),
+		"admin_email_configured":       strings.TrimSpace(request.Notifications.AdminEmail) != "",
+		"email_warning_enabled":        request.Enforcement.EmailWarning.Enabled,
+		"email_warning_lookback_count": request.Enforcement.EmailWarning.LookbackCount,
+		"email_warning_threshold":      request.Enforcement.EmailWarning.ViolationThreshold,
+		"account_disable_enabled":      request.Enforcement.AccountDisable.Enabled,
+		"account_disable_threshold":    request.Enforcement.AccountDisable.ViolationThreshold,
 	}
 }
 

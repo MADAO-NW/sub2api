@@ -24,7 +24,7 @@
 
       <div class="divide-y divide-gray-100 dark:divide-dark-800">
         <article
-          v-for="endpoint in endpoints"
+          v-for="(endpoint, index) in endpoints"
           :key="endpoint.id"
           :data-test="`endpoint-${endpoint.id}`"
           class="group grid gap-4 border-l-[3px] border-l-transparent px-4 py-4 transition-[background-color,border-color] duration-200 hover:border-l-primary-500 hover:bg-gray-50/80 dark:hover:bg-dark-800/55 sm:px-5 xl:grid-cols-[minmax(260px,1.45fr)_minmax(210px,1fr)_minmax(190px,.8fr)_minmax(230px,1.15fr)_auto] xl:items-center xl:gap-5"
@@ -46,6 +46,7 @@
             </button>
             <div class="min-w-0">
               <div class="flex min-w-0 items-center gap-2">
+                <span class="text-xs font-semibold tabular-nums text-gray-400">#{{ index + 1 }}</span>
                 <p class="truncate font-semibold text-gray-950 dark:text-white">{{ endpoint.name }}</p>
                 <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="endpoint.enabled ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-dark-500'" aria-hidden="true" />
               </div>
@@ -56,13 +57,13 @@
           <div class="min-w-0 xl:block">
             <p class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 xl:hidden">{{ t('admin.promptAudit.pool.model') }}</p>
             <p class="truncate text-sm font-medium text-gray-700 dark:text-dark-200" :title="endpoint.model">{{ endpoint.model }}</p>
+            <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">{{ adapterLabel(endpoint.adapter) }}</p>
           </div>
 
           <div>
             <p class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 xl:hidden">{{ t('admin.promptAudit.pool.limits') }}</p>
             <div class="flex flex-wrap gap-1.5 text-xs text-gray-600 dark:text-dark-300">
               <span class="rounded-md bg-gray-100 px-2 py-1 tabular-nums dark:bg-dark-800">{{ endpoint.timeout_ms }} ms</span>
-              <span class="rounded-md bg-gray-100 px-2 py-1 tabular-nums dark:bg-dark-800">{{ endpoint.input_limit }} chars</span>
             </div>
           </div>
 
@@ -82,6 +83,8 @@
           </div>
 
           <div class="flex flex-wrap items-center justify-end gap-1 border-t border-gray-100 pt-3 dark:border-dark-800 xl:flex-nowrap xl:border-0 xl:pt-0">
+            <button type="button" class="btn btn-ghost btn-sm" :disabled="index === 0" :aria-label="t('admin.promptAudit.pool.moveUp')" @click="moveEndpoint(index, -1)">↑</button>
+            <button type="button" class="btn btn-ghost btn-sm" :disabled="index === endpoints.length - 1" :aria-label="t('admin.promptAudit.pool.moveDown')" @click="moveEndpoint(index, 1)">↓</button>
             <button type="button" class="btn btn-secondary btn-sm" :disabled="probingIds.includes(endpoint.id)" @click="$emit('probe', endpoint)">
               {{ probingIds.includes(endpoint.id) ? t('admin.promptAudit.pool.probing') : t('admin.promptAudit.pool.probe') }}
             </button>
@@ -103,6 +106,13 @@
           <input v-model="editing.id" class="input w-full" required :disabled="editingIndex >= 0" :aria-label="t('admin.promptAudit.pool.id')" />
         </label>
         <label class="space-y-1 text-sm text-gray-700 dark:text-dark-200 sm:col-span-2">
+          <span>{{ t('admin.promptAudit.pool.adapter') }}</span>
+          <select v-model="editing.adapter" class="input w-full" :aria-label="t('admin.promptAudit.pool.adapter')">
+            <option value="qwen3guard">{{ t('admin.promptAudit.pool.adapters.qwen3guard') }}</option>
+            <option value="openai_compatible_qwen">{{ t('admin.promptAudit.pool.adapters.openai_compatible_qwen') }}</option>
+          </select>
+        </label>
+        <label class="space-y-1 text-sm text-gray-700 dark:text-dark-200 sm:col-span-2">
           <span>{{ t('admin.promptAudit.pool.baseUrl') }}</span>
           <input v-model="editing.base_url" class="input w-full" required inputmode="url" :aria-label="t('admin.promptAudit.pool.baseUrl')" />
         </label>
@@ -121,11 +131,7 @@
         </label>
         <label class="space-y-1 text-sm text-gray-700 dark:text-dark-200">
           <span>{{ t('admin.promptAudit.pool.timeout') }}</span>
-          <input v-model.number="editing.timeout_ms" class="input w-full" type="number" min="100" max="30000" required :aria-label="t('admin.promptAudit.pool.timeout')" />
-        </label>
-        <label class="space-y-1 text-sm text-gray-700 dark:text-dark-200">
-          <span>{{ t('admin.promptAudit.pool.inputLimit') }}</span>
-          <input v-model.number="editing.input_limit" class="input w-full" type="number" min="128" max="100000" required :aria-label="t('admin.promptAudit.pool.inputLimit')" />
+          <input v-model.number="editing.timeout_ms" class="input w-full" type="number" min="100" step="1" required :aria-label="t('admin.promptAudit.pool.timeout')" />
         </label>
       </form>
       <template #footer>
@@ -172,8 +178,11 @@ function closeEditor() {
 }
 function saveEditor() {
   if (!editing.value?.id.trim() || !editing.value.name.trim() || !editing.value.base_url.trim()) return
+  const timeoutMS = Number(editing.value.timeout_ms)
+  if (!Number.isSafeInteger(timeoutMS) || timeoutMS < 100) return
   const next = props.endpoints.map((item) => cloneData(item))
   const value = cloneData(editing.value)
+  value.timeout_ms = timeoutMS
   if (value.token.trim()) value.clear_token = false
   if (editingIndex.value < 0) next.push(value)
   else next.splice(editingIndex.value, 1, value)
@@ -182,6 +191,15 @@ function saveEditor() {
 }
 function toggleEndpoint(id: string) {
   emit('update:endpoints', props.endpoints.map((item) => item.id === id ? { ...item, enabled: !item.enabled } : cloneData(item)))
+}
+function moveEndpoint(index: number, offset: number) {
+  const target = index + offset
+  if (target < 0 || target >= props.endpoints.length) return
+  const next = props.endpoints.map((item) => cloneData(item))
+  const [moved] = next.splice(index, 1)
+  if (!moved) return
+  next.splice(target, 0, moved)
+  emit('update:endpoints', next)
 }
 function removeEndpoint(endpoint: PromptAuditEndpointDraft) {
   if (!window.confirm(t('admin.promptAudit.pool.deleteConfirm', { name: endpoint.name }))) return
@@ -192,5 +210,8 @@ function hasCredential(endpoint: PromptAuditEndpointDraft): boolean {
 }
 function credentialInvalid(endpoint: PromptAuditEndpointDraft): boolean {
   return endpoint.token_status === 'invalid' && !endpoint.token.trim() && !endpoint.clear_token
+}
+function adapterLabel(adapter: PromptAuditEndpointDraft['adapter']): string {
+  return t(`admin.promptAudit.pool.adapters.${adapter}`)
 }
 </script>

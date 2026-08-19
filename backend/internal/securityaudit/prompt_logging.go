@@ -52,10 +52,11 @@ var allowedLogFields = map[string]struct{}{
 	"protocol": {}, "endpoint": {}, "model": {}, "job_id": {}, "event_id": {},
 	"config_version": {}, "guard_endpoint_id": {}, "decision": {}, "risk_level": {},
 	"action": {}, "chunk_index": {}, "chunk_total": {}, "chunk_chars": {}, "input_chars": {},
-	"input_limit": {}, "latency_ms": {}, "status": {}, "error_code": {}, "error_kind": {},
+	"latency_ms": {}, "status": {}, "error_code": {}, "error_kind": {}, "adapter": {},
 	"queue_length": {}, "queue_capacity": {}, "stage": {}, "upstream_dispatched": {},
 	"billing_preconsumed": {}, "worker_id": {}, "reclaimed_total": {}, "attempts": {},
 	"max_attempts": {}, "claim_version": {}, "http_status": {}, "retryable": {},
+	"aggregation_strategy": {}, "enabled_model_count": {}, "block_threshold": {}, "partial_failure": {},
 }
 
 func LogInfo(event string, fields map[string]any) {
@@ -156,6 +157,38 @@ func stableErrorMessage(code string) string {
 		return "Prompt Audit dependency is unavailable"
 	case ErrorCodeInvalidResponse:
 		return "Prompt Guard returned an invalid response"
+	case "invalid_line_count":
+		return "Prompt Guard response must contain exactly two non-empty lines"
+	case "invalid_safety":
+		return "Prompt Guard response has an invalid Safety line"
+	case "invalid_categories":
+		return "Prompt Guard response has an invalid Categories line"
+	case "invalid_category_order":
+		return "Prompt Guard response categories are duplicated"
+	case "invalid_safety_category_pair":
+		return "Prompt Guard response Safety and Categories are inconsistent"
+	case "unexpected_output_wrapper":
+		return "Prompt Guard response contains JSON, Markdown, or another wrapper"
+	case "invalid_response_envelope":
+		return "Prompt Guard returned an invalid OpenAI-compatible response envelope"
+	case "empty_response_content":
+		return "Prompt Guard returned an empty response content"
+	case "invalid_response_content":
+		return "Prompt Guard returned an unsupported response content"
+	case "response_too_large":
+		return "Prompt Guard response exceeded the allowed size"
+	case "response_read_failed":
+		return "Prompt Guard response could not be read"
+	case "http_status_error":
+		return "Prompt Guard returned an unsuccessful HTTP status"
+	case "model_request_failed":
+		return "Prompt Guard model request failed"
+	case "empty_model_result":
+		return "Prompt Guard returned an empty result"
+	case "model_timeout":
+		return "Prompt Guard model call timed out"
+	case "all_models_failed":
+		return "All Prompt Guard models failed"
 	case "queue_full", "queue_admission_busy":
 		return "Prompt Audit queue is unavailable"
 	case "worker_panic":

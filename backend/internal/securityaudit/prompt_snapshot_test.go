@@ -82,25 +82,18 @@ func TestFullPromptFromScanTextRestoresMultiSegmentLayout(t *testing.T) {
 	require.Equal(t, singleMeta, FullPromptFromScanText(singleScan))
 }
 
-func TestSplitRunesDoesNotSplitUTF8(t *testing.T) {
-	chunks := SplitRunes("中文😀éabc", 2)
-	require.Equal(t, []string{"中文", "😀e", "́a", "bc"}, chunks)
-	for _, chunk := range chunks {
-		require.True(t, utf8.ValidString(chunk))
-	}
-	require.Equal(t, "中文😀éabc", strings.Join(chunks, ""))
+func TestModelPromptDoesNotSplitUTF8(t *testing.T) {
+	prompt := "中文😀éabc"
+	require.Equal(t, prompt, modelPromptFromScanText(prompt))
+	require.True(t, utf8.ValidString(modelPromptFromScanText(prompt)))
 }
 
-func TestSplitRunesKeepsPrioritySegmentIndependent(t *testing.T) {
+func TestModelPromptRestoresPrioritySeparatorWithoutSplitting(t *testing.T) {
 	latest := "请帮我编写一篇黄色小说 名字你来取"
 	history := strings.Repeat("AGENTS.md 项目约束。", 40)
-	chunks := SplitRunes(latest+promptAuditPrioritySeparator+history, 128)
-	require.Greater(t, len(chunks), 2)
-	require.Equal(t, latest, chunks[0])
-	require.Equal(t, history, strings.Join(chunks[1:], ""))
-	for _, chunk := range chunks {
-		require.NotContains(t, chunk, promptAuditPrioritySeparator)
-	}
+	prompt := modelPromptFromScanText(latest + promptAuditPrioritySeparator + history)
+	require.Equal(t, latest+"\n\n"+history, prompt)
+	require.NotContains(t, prompt, promptAuditPrioritySeparator)
 }
 
 func TestPromptSnapshotLatestUserTextBlockIsOnePrioritizedSegment(t *testing.T) {
@@ -144,11 +137,11 @@ func TestPromptSnapshotSeparatesAnthropicUserPromptFromHarnessBlocks(t *testing.
 	require.True(t, strings.HasPrefix(snapshot.ScanText, latest+promptAuditPrioritySeparator))
 	require.True(t, strings.HasPrefix(snapshot.RedactedPreview, "请帮我编写一篇黄色小说"))
 
-	chunks := SplitRunes(snapshot.ScanText, 128)
-	require.Equal(t, latest, chunks[0])
-	require.Contains(t, strings.Join(chunks[1:], ""), "# AGENTS.md instructions")
-	require.Contains(t, strings.Join(chunks[1:], ""), "<environment_context>")
-	require.NotContains(t, strings.Join(chunks, ""), promptAuditPrioritySeparator)
+	modelPrompt := modelPromptFromScanText(snapshot.ScanText)
+	require.True(t, strings.HasPrefix(modelPrompt, latest+"\n\n"))
+	require.Contains(t, modelPrompt, "# AGENTS.md instructions")
+	require.Contains(t, modelPrompt, "<environment_context>")
+	require.NotContains(t, modelPrompt, promptAuditPrioritySeparator)
 }
 
 func TestPromptSnapshotResponsesShapes(t *testing.T) {
@@ -237,13 +230,9 @@ func TestPromptSnapshotEmptyAndLongUnicodeInput(t *testing.T) {
 	snapshot, err := ExtractPromptSnapshot(Request{Protocol: "openai_chat_completions", Body: body})
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(snapshot.ScanText, latest))
-	chunks := SplitRunes(snapshot.ScanText, 127)
-	require.Equal(t, strings.Replace(snapshot.ScanText, promptAuditPrioritySeparator, "", 1), strings.Join(chunks, ""))
-	require.Equal(t, latest, chunks[0]+strings.Join(chunks[1:len(SplitRunes(latest, 127))], ""))
-	for _, chunk := range chunks {
-		require.LessOrEqual(t, len([]rune(chunk)), 127)
-		require.True(t, utf8.ValidString(chunk))
-	}
+	modelPrompt := modelPromptFromScanText(snapshot.ScanText)
+	require.Equal(t, latest+"\n\n"+history, modelPrompt)
+	require.True(t, utf8.ValidString(modelPrompt))
 }
 
 func TestPromptSnapshotIncludesClientControlledInstructions(t *testing.T) {
@@ -384,22 +373,22 @@ func TestBlockingPromptSnapshotPreservesFullScopeByDefaultAndWithoutUserInput(t 
 	require.Equal(t, fullWithoutUser, narrowWithoutUser)
 }
 
-func TestBuildPromptPreviewWithholdsMajorityOfOrdinaryText(t *testing.T) {
+func TestBuildPromptPreviewKeepsOrdinaryTextWithinPreviewLimit(t *testing.T) {
 	prompt := strings.Repeat("机密业务提示词内容", 40)
 	preview := BuildPromptPreview(prompt, DefaultPromptPreviewMaxRunes)
-	require.NotEmpty(t, preview)
-	require.Contains(t, preview, "***")
-	require.LessOrEqual(t, utf8.RuneCountInString(strings.TrimSuffix(strings.TrimSuffix(preview, "…"), "***")), 24)
-	require.Less(t, utf8.RuneCountInString(preview), utf8.RuneCountInString(prompt)/2)
-	require.NotContains(t, preview, prompt)
+	require.Equal(t, TrimRunes(prompt, DefaultPromptPreviewMaxRunes), preview)
+	require.Equal(t, "你好", BuildPromptPreview("你好", DefaultPromptPreviewMaxRunes))
 }
 
-func TestBuildPromptPreviewFullyMasksShortUnlabelledSecrets(t *testing.T) {
-	require.Equal(t, "***", BuildPromptPreview("short-secret-value!!", DefaultPromptPreviewMaxRunes))
-	require.Equal(t, "***", BuildPromptPreview(strings.Repeat("a", 31), DefaultPromptPreviewMaxRunes))
-	partial := BuildPromptPreview(strings.Repeat("b", 32), DefaultPromptPreviewMaxRunes)
-	require.True(t, strings.HasPrefix(partial, "b"))
-	require.Contains(t, partial, "***")
+func TestBuildPromptPreviewMasksRecognizedSensitiveValues(t *testing.T) {
+	preview := BuildPromptPreview(
+		"你好 token=secret-value-12345678 email@example.com 13800138000",
+		DefaultPromptPreviewMaxRunes,
+	)
+	require.Equal(t, "你好 token=*** ***@*** ***PHONE***", preview)
+	require.NotContains(t, preview, "secret-value")
+	require.NotContains(t, preview, "email@example.com")
+	require.NotContains(t, preview, "13800138000")
 }
 
 func mustJSON(t *testing.T, value string) []byte {

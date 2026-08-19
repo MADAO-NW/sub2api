@@ -30,13 +30,13 @@
 | ID | Requirement | 必备自动化证据 | 补充证据 | 状态 |
 | --- | --- | --- | --- | --- |
 | A01 | 独立且默认关闭 | Coordinator off 单测；默认 config 单测；现有 Moderation 回归 | 升级后 config/runtime 截图 | 通过（自动化） |
-| A02 | OpenAI 兼容节点 | request builder golden；mock server 断言 `/v1/chat/completions`、model/messages/temperature/max_tokens/seed | probe 脱敏结果 | 通过（自动化） |
+| A02 | OpenAI 兼容节点 | request builder golden；mock server 断言 `/v1/chat/completions`、model/messages/temperature/stream/seed，并断言不发送输出 Token 上限 | probe 脱敏结果 | 通过（自动化） |
 | A03 | 凭据和出站地址安全 | 加密往返；Public DTO canary；SSRF/DNS rebinding/redirect/256 KiB 测试 | 配置 JSON 与日志扫描 | 通过（自动化） |
 | A04 | 按协议提取输入快照 | Chat/Responses/Claude/Gemini/images/media/WS 表驱动测试；用户名/邮箱/API Key 名称分列 | 路由覆盖清单 | 通过（自动化） |
 | A05 | 数据库快照脱敏不可恢复 | canary Prompt 入库后全列扫描；预览/hash 单测 | schema 禁止列 SQL | 通过（自动化+SQL） |
-| A06 | 持久任务 + Redis TTL | staging→SET EX→queued；多实例队列 admission lock；Redis/发布失败补偿测试 | TTL 1800 秒窗口证据 | 通过（集成） |
-| A07 | Worker 可靠消费 | SKIP LOCKED、claim_version fencing、retry、lease refresh/reclaim、panic、shutdown 测试 | 多 Worker 运行指标 | 通过（集成+race） |
-| A08 | Qwen3Guard 严格归一 | Safe/Controversial/Unsafe、九类、未知类、重复/额外/缺失字段测试 | golden response 语料 | 通过（自动化） |
+| A06 | 持久任务 + Redis TTL | staging→SET EX→queued；多实例队列 admission lock；Redis/发布失败补偿；长 timeout 累计预算无溢出 | TTL 动态预算证据 | 通过（集成） |
+| A07 | Worker 可靠消费 | SKIP LOCKED、claim_version fencing、retry、调用前和长调用期间 lease heartbeat、refresh 失败取消、reclaim、panic、shutdown 测试 | 多 Worker 运行指标 | 通过（集成+race） |
+| A08 | Qwen3Guard 严格归一 | Safe/Controversial/Unsafe、九类、合法乱序规范化且单次调用、未知类、重复/额外/缺失字段测试 | golden response 语料 | 通过（自动化） |
 | A09 | Unicode 完整分片 | 中文/emoji/组合字符/超长文本覆盖与顺序测试；部分失败不 Allow；逐片日志无正文 | chunk_total 事件样本 | 通过（自动化） |
 | A10 | 独立可关联事件 | event transaction、store_pass_events、身份快照、FK/筛选、IssueSummary 派生测试 | 管理事件详情截图 | 通过（集成） |
 | A11 | 真实运行态 | healthy/degraded/error、Redis/DB/Worker/节点/config version 测试 | runtime JSON 样本 | 通过（自动化） |
@@ -240,6 +240,7 @@ WHERE table_name IN ('prompt_audit_jobs', 'prompt_audit_events')
 - 1000 个 queued/retry jobs，由 8 个 Worker、2 个 service 实例消费，每个 job 最多一个最终 event。
 - 两实例同时争抢最后 N 个 queue slots，admission lock 后 active jobs 不超过 capacity；锁超时只丢弃审计任务。
 - Worker 在 claim 后崩溃，租约到期由另一 Worker reclaim。
+- 单模型调用超过 90 秒时每 30 秒刷新 processing 租约，不得被另一 Worker reclaim；刷新失败立即取消调用。
 - 旧 Worker 恢复后，旧 claim_version 的 refresh/event/done/retry/failed 全部 affected rows=0，无法覆盖新领取者状态或创建重复事件。
 - staging 在 Redis SET 前不可领取。
 - 进程在 Redis SET 与 queued publish 间退出，staging 被回收且 payload TTL 到期。

@@ -136,7 +136,64 @@ type NormalizedResult struct {
 	PolicyVersion     int                `json:"policy_version"`
 	ChunkTotal        int                `json:"chunk_total"`
 	LatencyMS         int                `json:"latency_ms"`
+	InputTokens       *int               `json:"input_tokens,omitempty"`
+	OutputTokens      *int               `json:"output_tokens,omitempty"`
+	ReasoningTokens   *int               `json:"reasoning_tokens,omitempty"`
 	UnknownCategories []string           `json:"unknown_categories,omitempty"`
+	ModelResults      ModelResults       `json:"-"`
+	FailedAttempts    []ModelCallAttempt `json:"-"`
+}
+
+type ModelAggregation struct {
+	Strategy              string `json:"strategy"`
+	EnabledModelCount     int    `json:"enabled_model_count"`
+	BlockThreshold        int    `json:"block_threshold"`
+	ConfigVersion         int64  `json:"config_version"`
+	PromptContractVersion string `json:"prompt_contract_version"`
+	AuditPromptHash       string `json:"audit_prompt_hash"`
+	PartialFailure        bool   `json:"partial_failure"`
+}
+
+type ModelAuditResult struct {
+	Sequence        int           `json:"sequence"`
+	EndpointID      string        `json:"endpoint_id"`
+	Adapter         string        `json:"adapter"`
+	Model           string        `json:"model"`
+	Safety          string        `json:"safety"`
+	Categories      []string      `json:"categories"`
+	Decision        EventDecision `json:"decision,omitempty"`
+	Action          Action        `json:"action,omitempty"`
+	LatencyMS       int           `json:"latency_ms"`
+	InputTokens     *int          `json:"input_tokens,omitempty"`
+	OutputTokens    *int          `json:"output_tokens,omitempty"`
+	ReasoningTokens *int          `json:"reasoning_tokens,omitempty"`
+	ErrorCode       string        `json:"error_code"`
+}
+
+type ModelCallAttempt struct {
+	ModelSequence     int
+	CallAttempt       int
+	AttemptKind       string
+	EndpointID        string
+	Adapter           string
+	Model             string
+	HTTPStatus        int
+	LatencyMS         int
+	InputTokens       *int
+	OutputTokens      *int
+	ReasoningTokens   *int
+	ErrorCode         string
+	Retryable         bool
+	ResponseBody      string
+	ResponseSHA256    string
+	ResponseBytes     int
+	ResponseTruncated bool
+}
+
+type ModelResults struct {
+	Aggregation    ModelAggregation   `json:"aggregation"`
+	Models         []ModelAuditResult `json:"models"`
+	FailedAttempts []ModelCallAttempt `json:"-"`
 }
 
 type PromptDecision struct {
@@ -219,6 +276,46 @@ type AuditMetricsSnapshot struct {
 	Dropped  int64 `json:"dropped"`
 }
 
+type EndpointMetricsSnapshot struct {
+	Requests        int64 `json:"requests"`
+	Pass            int64 `json:"pass"`
+	Flag            int64 `json:"flag"`
+	Critical        int64 `json:"critical"`
+	Errors          int64 `json:"errors"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	LatencyP50MS    int64 `json:"latency_p50_ms"`
+	LatencyP95MS    int64 `json:"latency_p95_ms"`
+}
+
+type EvaluationMetricsSnapshot struct {
+	Total          int64 `json:"total"`
+	PartialFailure int64 `json:"partial_failure"`
+	LatencyP50MS   int64 `json:"latency_p50_ms"`
+	LatencyP95MS   int64 `json:"latency_p95_ms"`
+}
+
+type RuntimeModelSnapshot struct {
+	Sequence  int                     `json:"sequence"`
+	ID        string                  `json:"id"`
+	Name      string                  `json:"name"`
+	Adapter   string                  `json:"adapter"`
+	Model     string                  `json:"model"`
+	Enabled   bool                    `json:"enabled"`
+	TimeoutMS int64                   `json:"timeout_ms"`
+	Probe     *ProbeResult            `json:"probe,omitempty"`
+	Metrics   EndpointMetricsSnapshot `json:"metrics"`
+}
+
+type EnforcementRuntimeStats struct {
+	OutcomesTotal     int64 `json:"outcomes_total"`
+	ViolationsTotal   int64 `json:"violations_total"`
+	WarningsTotal     int64 `json:"warnings_total"`
+	DisabledTotal     int64 `json:"disabled_total"`
+	MailFailuresTotal int64 `json:"mail_failures_total"`
+}
+
 type QueueStats struct {
 	Staging    int64 `json:"staging"`
 	Queued     int64 `json:"queued"`
@@ -230,28 +327,36 @@ type QueueStats struct {
 }
 
 type RuntimeSnapshot struct {
-	ProcessStatus         string                 `json:"process_status"`
-	EffectiveMode         Mode                   `json:"effective_mode"`
-	ExpectedConfigVersion int64                  `json:"expected_config_version"`
-	ActiveConfigVersion   int64                  `json:"active_config_version"`
-	ConfigLoadedAt        *time.Time             `json:"config_loaded_at,omitempty"`
-	ConfigLoadError       string                 `json:"config_load_error,omitempty"`
-	WorkerTotal           int                    `json:"worker_total"`
-	WorkerActive          int64                  `json:"worker_active"`
-	WorkerHeartbeatAt     *time.Time             `json:"worker_heartbeat_at,omitempty"`
-	QueueCapacity         int                    `json:"queue_capacity"`
-	Queue                 QueueStats             `json:"queue"`
-	ProcessedTotal        int64                  `json:"processed_total"`
-	FailedTotal           int64                  `json:"failed_total"`
-	EnqueuedTotal         int64                  `json:"enqueued_total"`
-	DroppedTotal          int64                  `json:"dropped_total"`
-	LastProcessedAt       *time.Time             `json:"last_processed_at,omitempty"`
-	LastErrorCode         string                 `json:"last_error_code,omitempty"`
-	LastErrorMessage      string                 `json:"last_error_message,omitempty"`
-	DatabaseStatus        string                 `json:"database_status"`
-	RedisStatus           string                 `json:"redis_status"`
-	Endpoints             map[string]ProbeResult `json:"endpoints"`
-	GuardMetrics          GuardMetricsSnapshot   `json:"guard_metrics"`
+	ProcessStatus         string                    `json:"process_status"`
+	EffectiveMode         Mode                      `json:"effective_mode"`
+	ExpectedConfigVersion int64                     `json:"expected_config_version"`
+	ActiveConfigVersion   int64                     `json:"active_config_version"`
+	ConfigLoadedAt        *time.Time                `json:"config_loaded_at,omitempty"`
+	ConfigLoadError       string                    `json:"config_load_error,omitempty"`
+	WorkerTotal           int                       `json:"worker_total"`
+	WorkerActive          int64                     `json:"worker_active"`
+	WorkerHeartbeatAt     *time.Time                `json:"worker_heartbeat_at,omitempty"`
+	QueueCapacity         int                       `json:"queue_capacity"`
+	Queue                 QueueStats                `json:"queue"`
+	ProcessedTotal        int64                     `json:"processed_total"`
+	FailedTotal           int64                     `json:"failed_total"`
+	EnqueuedTotal         int64                     `json:"enqueued_total"`
+	DroppedTotal          int64                     `json:"dropped_total"`
+	LastProcessedAt       *time.Time                `json:"last_processed_at,omitempty"`
+	LastErrorCode         string                    `json:"last_error_code,omitempty"`
+	LastErrorMessage      string                    `json:"last_error_message,omitempty"`
+	DatabaseStatus        string                    `json:"database_status"`
+	RedisStatus           string                    `json:"redis_status"`
+	Endpoints             map[string]ProbeResult    `json:"endpoints"`
+	Models                []RuntimeModelSnapshot    `json:"models"`
+	AggregationStrategy   string                    `json:"aggregation_strategy"`
+	EnabledModelCount     int                       `json:"enabled_model_count"`
+	BlockThreshold        int                       `json:"block_threshold"`
+	PromptContractVersion string                    `json:"prompt_contract_version"`
+	AuditPromptHash       string                    `json:"audit_prompt_hash"`
+	GuardMetrics          GuardMetricsSnapshot      `json:"guard_metrics"`
+	EvaluationMetrics     EvaluationMetricsSnapshot `json:"evaluation_metrics"`
+	Enforcement           EnforcementRuntimeStats   `json:"enforcement"`
 }
 
 type Clock interface {
@@ -272,8 +377,19 @@ type Metrics interface {
 	IncFailover()
 	IncBulkheadFull()
 	IncRecordFailed()
+	ObserveModel(result ModelAuditResult)
+	ObserveEvaluation(aggregation ModelAggregation, latency time.Duration)
+	ModelSnapshot(endpointIDs []string) map[string]EndpointMetricsSnapshot
+	EvaluationSnapshot() EvaluationMetricsSnapshot
 }
 
 type PromptScanner interface {
-	Scan(ctx context.Context, endpoint ActiveEndpoint, chunk string, enabledScanners []string) (*NormalizedResult, error)
+	Scan(ctx context.Context, request ModelScanRequest) (*NormalizedResult, error)
+}
+
+type ModelScanRequest struct {
+	Endpoint        ActiveEndpoint
+	FullPrompt      string
+	AuditPrompt     string
+	EnabledScanners []string
 }

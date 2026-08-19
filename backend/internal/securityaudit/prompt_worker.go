@@ -6,7 +6,30 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	appservice "github.com/Wei-Shaw/sub2api/internal/service"
 )
+
+// promptModelAttemptResponseRetention 固定失败模型响应正文保留 30 天。
+const promptModelAttemptResponseRetention = 30 * 24 * time.Hour
+
+// promptModelAttemptCleanupInterval 固定每小时执行一次失败响应正文清理。
+const promptModelAttemptCleanupInterval = time.Hour
+
+// promptModelAttemptCleanupBatchSize 限制单次清理的数据库更新量。
+const promptModelAttemptCleanupBatchSize = 1000
+
+// promptAuditLeaseHeartbeatInterval 保证长时间模型调用不会超过任务租约刷新窗口。
+const promptAuditLeaseHeartbeatInterval = 30 * time.Second
+
+// promptAuditLeaseRefreshTimeout 限制单次数据库租约刷新等待时间。
+const promptAuditLeaseRefreshTimeout = 5 * time.Second
+
+// promptAuditStagingTimeout 标记尚未完成 Payload 发布的 staging 任务失效时间。
+const promptAuditStagingTimeout = 2 * time.Minute
+
+// promptAuditProcessingLeaseTimeout 标记 processing 任务失去租约的时间。
+const promptAuditProcessingLeaseTimeout = 90 * time.Second
 
 type WorkerRuntime struct {
 	active           atomic.Int64
@@ -25,16 +48,33 @@ type Runner struct {
 	payload PayloadStore
 	scanner PromptScanner
 	metrics Metrics
+	cache   appservice.APIKeyAuthCacheInvalidator
 	clock   Clock
 	runtime WorkerRuntime
+
+	leaseHeartbeatInterval time.Duration
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewRunner(config ConfigStore, repo JobRepository, payload PayloadStore, scanner PromptScanner, metrics Metrics) *Runner {
-	return &Runner{config: config, repo: repo, payload: payload, scanner: scanner, metrics: metrics, clock: realClock{}}
+func NewRunner(
+	config ConfigStore,
+	repo JobRepository,
+	payload PayloadStore,
+	scanner PromptScanner,
+	metrics Metrics,
+	cache ...appservice.APIKeyAuthCacheInvalidator,
+) *Runner {
+	runner := &Runner{
+		config: config, repo: repo, payload: payload, scanner: scanner, metrics: metrics, clock: realClock{},
+		leaseHeartbeatInterval: promptAuditLeaseHeartbeatInterval,
+	}
+	if len(cache) > 0 {
+		runner.cache = cache[0]
+	}
+	return runner
 }
 
 func (r *Runner) Start(ctx context.Context) error {
@@ -93,11 +133,11 @@ func (r *Runner) worker(ctx context.Context, workerID int) {
 			return
 		case <-ticker.C:
 			r.runtime.heartbeatNS.Store(r.clock.Now().UnixNano())
-			cfg, ok := r.config.Active()
-			if !ok || !cfg.RiskControlEnabled || !cfg.Enabled || workerID >= cfg.WorkerCount {
-				continue
-			}
 			for {
+				cfg, ok := r.config.Active()
+				if !ok || !cfg.RiskControlEnabled || !cfg.Enabled || workerID >= cfg.WorkerCount {
+					break
+				}
 				job, claimed, err := r.repo.ClaimNextJob(ctx, r.clock.Now())
 				if err != nil {
 					r.setLastError("claim_job_failed", err.Error())
@@ -121,7 +161,7 @@ func (r *Runner) processSafely(ctx context.Context, workerID int, cfg ActiveConf
 			// Panic values may contain scanner response fragments or prompt data.
 			// Keep only a stable generic message in runtime state and logs.
 			r.setLastError("worker_panic", "worker panic recovered")
-			_ = r.repo.Fail(ctx, job.ID, job.ClaimVersion, "worker_panic", "worker panic recovered")
+			_ = r.repo.Fail(ctx, job.ID, job.ClaimVersion, job.Attempts, "worker_panic", "worker panic recovered", nil)
 			LogError(EventProcessFailed, mergeLogFields(jobLogFields(job), map[string]any{"worker_id": workerID, "status": "failed", "error_code": "worker_panic"}))
 		}
 	}()
@@ -147,51 +187,48 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 	if len(endpoints) == 0 {
 		return r.finishFailure(ctx, job, &GuardError{Code: "no_enabled_endpoint", Retryable: true})
 	}
-	chunks := SplitRunes(scanText, minimumInputLimit(endpoints))
-	results := make([]*NormalizedResult, 0, len(chunks))
 	started := r.clock.Now()
-	for index, chunk := range chunks {
-		if err := r.repo.RefreshLease(ctx, job.ID, job.ClaimVersion, r.clock.Now()); err != nil {
+	aggregated, err := runOrderedModels(
+		ctx,
+		cfg,
+		scanText,
+		r.clock,
+		r.metrics,
+		func(callCtx context.Context, _ ActiveEndpoint) error {
+			return r.repo.RefreshLease(callCtx, job.ID, job.ClaimVersion, r.clock.Now())
+		},
+		func(callCtx context.Context, request ModelScanRequest) (*NormalizedResult, error) {
+			return r.scanWithLeaseHeartbeat(ctx, callCtx, job, request)
+		},
+	)
+	if err != nil {
+		if errors.Is(err, ErrLeaseLost) {
 			return err
 		}
-		chunkStarted := r.clock.Now()
-		LogInfo(EventChunkStarted, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "chunk_index": index + 1, "chunk_total": len(chunks), "chunk_chars": len([]rune(chunk)), "input_chars": job.Snapshot.PromptLength, "input_limit": minimumInputLimit(endpoints), "status": "started"}))
-		result, scanErr := scanWithFailover(ctx, r.scanner, cfg.Scanners, endpoints, chunk, r.metrics)
-		if scanErr != nil {
-			LogWarn(EventChunkFailed, mergeLogFields(baseFields, map[string]any{
-				"worker_id": workerID, "chunk_index": index + 1, "chunk_total": len(chunks),
-				"chunk_chars": len([]rune(chunk)), "input_chars": job.Snapshot.PromptLength,
-				"input_limit": minimumInputLimit(endpoints), "latency_ms": r.clock.Now().Sub(chunkStarted).Milliseconds(),
-				"error_code": guardErrorCode(scanErr), "status": "failed",
-			}))
-			r.observeAsyncFailure(scanErr, r.clock.Now().Sub(started))
-			return r.finishFailure(ctx, job, scanErr)
-		}
-		results = append(results, result)
-		LogInfo(EventChunkCompleted, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "chunk_index": index + 1, "chunk_total": len(chunks), "guard_endpoint_id": result.GuardEndpointID, "action": result.Action, "latency_ms": r.clock.Now().Sub(chunkStarted).Milliseconds(), "status": "completed"}))
-		if result.Action == ActionBlock {
-			break
-		}
+		r.observeAsyncFailure(err, r.clock.Now().Sub(started))
+		return r.finishFailure(ctx, job, err)
 	}
-	aggregated, err := AggregateResults(results, r.clock.Now().Sub(started))
-	if err != nil {
-		if r.metrics != nil {
-			r.metrics.Observe(DecisionInvalid, r.clock.Now().Sub(started))
-		}
-		return r.finishFailure(ctx, job, &GuardError{Code: ErrorCodeInvalidResponse, Cause: err})
-	}
-	aggregated.ChunkTotal = len(chunks)
 	if r.metrics != nil {
 		r.metrics.Observe(decisionKindForResult(aggregated), r.clock.Now().Sub(started))
 	}
 	LogInfo(EventChunksAggregated, mergeLogFields(baseFields, map[string]any{
 		"worker_id": workerID, "decision": aggregated.Decision, "risk_level": aggregated.RiskLevel,
-		"action": aggregated.Action, "chunk_total": aggregated.ChunkTotal,
-		"latency_ms": aggregated.LatencyMS, "guard_endpoint_id": aggregated.GuardEndpointID, "status": "completed",
+		"action":              aggregated.Action,
+		"enabled_model_count": aggregated.ModelResults.Aggregation.EnabledModelCount,
+		"block_threshold":     aggregated.ModelResults.Aggregation.BlockThreshold,
+		"partial_failure":     aggregated.ModelResults.Aggregation.PartialFailure,
+		"latency_ms":          aggregated.LatencyMS, "guard_endpoint_id": aggregated.GuardEndpointID, "status": "completed",
 	}))
-	event, err := r.repo.Complete(ctx, job, aggregated, cfg.StorePassEvents)
+	completion, err := r.repo.Complete(ctx, job, aggregated, cfg)
 	if err != nil {
 		return err
+	}
+	var event *Event
+	if completion != nil {
+		event = completion.Event
+		if completion.DisabledUserID > 0 && r.cache != nil {
+			r.cache.InvalidateAuthCacheByUserID(ctx, completion.DisabledUserID)
+		}
 	}
 	if deleteErr := r.payload.Delete(ctx, job.ID); deleteErr != nil {
 		LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "status": "payload_delete_deferred", "error_code": "payload_delete_failed"}))
@@ -201,6 +238,57 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 		LogWarn(EventFindingRecorded, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "event_id": event.ID, "decision": aggregated.Decision, "risk_level": aggregated.RiskLevel, "action": aggregated.Action, "guard_endpoint_id": aggregated.GuardEndpointID, "status": "recorded"}))
 	}
 	return nil
+}
+
+func (r *Runner) scanWithLeaseHeartbeat(
+	workerCtx context.Context,
+	modelCtx context.Context,
+	job *Job,
+	request ModelScanRequest,
+) (*NormalizedResult, error) {
+	interval := r.leaseHeartbeatInterval
+	if interval <= 0 {
+		interval = promptAuditLeaseHeartbeatInterval
+	}
+	scanCtx, cancelScan := context.WithCancel(modelCtx)
+	defer cancelScan()
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(workerCtx)
+	heartbeatDone := make(chan struct{})
+	heartbeatErr := make(chan error, 1)
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				refreshCtx, cancelRefresh := context.WithTimeout(heartbeatCtx, promptAuditLeaseRefreshTimeout)
+				err := r.repo.RefreshLease(refreshCtx, job.ID, job.ClaimVersion, r.clock.Now())
+				cancelRefresh()
+				if err != nil {
+					if heartbeatCtx.Err() != nil {
+						return
+					}
+					heartbeatErr <- err
+					cancelScan()
+					return
+				}
+			}
+		}
+	}()
+
+	result, err := callPromptScanner(scanCtx, r.scanner, request)
+	cancelHeartbeat()
+	<-heartbeatDone
+	select {
+	case <-heartbeatErr:
+		// 租约刷新失败后无法证明当前 Worker 仍拥有任务，交由回收器安全重领。
+		return nil, ErrLeaseLost
+	default:
+		return result, err
+	}
 }
 
 func (r *Runner) observeAsyncFailure(err error, latency time.Duration) {
@@ -234,7 +322,9 @@ func decisionKindForResult(result *NormalizedResult) DecisionKind {
 
 func (r *Runner) finishFailure(ctx context.Context, job *Job, err error) error {
 	baseFields := jobLogFields(job)
-	code := guardErrorCode(err)
+	// Job 和运行态保留模型级稳定错误码，便于区分两行数、类别和字段格式错误。
+	code := modelErrorCode(err)
+	attempts := modelAttemptsFromError(err)
 	retryable := false
 	var guardErr *GuardError
 	if errors.As(err, &guardErr) {
@@ -242,12 +332,18 @@ func (r *Runner) finishFailure(ctx context.Context, job *Job, err error) error {
 	}
 	if retryable && job.Attempts < job.MaxAttempts {
 		next := r.clock.Now().Add(retryBackoff(job.Attempts))
-		if updateErr := r.repo.Retry(ctx, job.ID, job.ClaimVersion, next, code, "prompt guard temporarily unavailable"); updateErr != nil {
+		if updateErr := r.repo.Retry(
+			ctx, job.ID, job.ClaimVersion, job.Attempts, next, code,
+			"prompt guard temporarily unavailable", attempts,
+		); updateErr != nil {
 			return updateErr
 		}
 		LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{"attempts": job.Attempts, "max_attempts": job.MaxAttempts, "status": "retry", "error_code": code, "retryable": true}))
 	} else {
-		if updateErr := r.repo.Fail(ctx, job.ID, job.ClaimVersion, code, "prompt guard processing failed"); updateErr != nil {
+		if updateErr := r.repo.Fail(
+			ctx, job.ID, job.ClaimVersion, job.Attempts, code,
+			"prompt guard processing failed", attempts,
+		); updateErr != nil {
 			return updateErr
 		}
 		_ = r.payload.Delete(ctx, job.ID)
@@ -259,21 +355,37 @@ func (r *Runner) finishFailure(ctx context.Context, job *Job, err error) error {
 
 func (r *Runner) reclaimer(ctx context.Context) {
 	defer r.wg.Done()
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
+	reclaimTicker := time.NewTicker(time.Minute)
+	cleanupTicker := time.NewTicker(promptModelAttemptCleanupInterval)
+	defer reclaimTicker.Stop()
+	defer cleanupTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-reclaimTicker.C:
 			now := r.clock.Now()
-			count, err := r.repo.ReclaimStale(ctx, now.Add(-2*time.Minute), now.Add(-90*time.Second), 100)
+			count, err := r.repo.ReclaimStale(
+				ctx,
+				now.Add(-promptAuditStagingTimeout),
+				now.Add(-promptAuditProcessingLeaseTimeout),
+				100,
+			)
 			if err != nil {
 				r.setLastError("reclaim_failed", err.Error())
 				continue
 			}
 			if count > 0 {
 				LogWarn(EventProcessingReclaimed, map[string]any{"reclaimed_total": count, "status": "reclaimed"})
+			}
+		case <-cleanupTicker.C:
+			_, err := r.repo.PurgeExpiredModelAttemptBodies(
+				ctx,
+				r.clock.Now().Add(-promptModelAttemptResponseRetention),
+				promptModelAttemptCleanupBatchSize,
+			)
+			if err != nil {
+				r.setLastError("model_attempt_cleanup_failed", err.Error())
 			}
 		}
 	}
@@ -304,31 +416,6 @@ func (r *Runner) setLastError(code, _ string) {
 	r.runtime.lastErrorCode = code
 	r.runtime.lastErrorMessage = message
 	r.runtime.lastErrorMu.Unlock()
-}
-
-func scanWithFailover(ctx context.Context, scanner PromptScanner, scanners []string, endpoints []ActiveEndpoint, chunk string, metrics Metrics) (*NormalizedResult, error) {
-	var lastErr error
-	for index, endpoint := range endpoints {
-		result, err := scanner.Scan(ctx, endpoint, chunk, scanners)
-		if err == nil && result != nil {
-			return result, nil
-		}
-		if err == nil {
-			err = &GuardError{Code: ErrorCodeInvalidResponse, Retryable: false}
-		}
-		lastErr = err
-		var guardErr *GuardError
-		if !errors.As(err, &guardErr) || !guardErr.Retryable {
-			return nil, err
-		}
-		if index < len(endpoints)-1 && metrics != nil {
-			metrics.IncFailover()
-		}
-	}
-	if lastErr == nil {
-		lastErr = &GuardError{Code: ErrorCodeUnavailable}
-	}
-	return nil, lastErr
 }
 
 func retryBackoff(attempt int) time.Duration {

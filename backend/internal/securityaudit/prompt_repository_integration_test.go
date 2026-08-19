@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	dbent "github.com/Wei-Shaw/sub2api/ent"
+	appservice "github.com/Wei-Shaw/sub2api/internal/service"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +38,13 @@ func openPromptAuditIntegrationDB(t *testing.T) *sql.DB {
 	defer cancel()
 	require.NoError(t, db.PingContext(ctx))
 	_, err = db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY);
+		CREATE TABLE IF NOT EXISTS users (
+			id BIGSERIAL PRIMARY KEY,
+			email VARCHAR(320) NOT NULL DEFAULT '',
+			role VARCHAR(20) NOT NULL DEFAULT 'user',
+			status VARCHAR(20) NOT NULL DEFAULT 'active',
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
 		CREATE TABLE IF NOT EXISTS groups (id BIGSERIAL PRIMARY KEY);
 		CREATE TABLE IF NOT EXISTS api_keys (id BIGSERIAL PRIMARY KEY);
 		CREATE TABLE IF NOT EXISTS settings (
@@ -43,7 +54,11 @@ func openPromptAuditIntegrationDB(t *testing.T) *sql.DB {
 		);
 	`)
 	require.NoError(t, err)
-	for _, name := range []string{"181_prompt_audit.sql", "182_prompt_audit_full_prompt.sql"} {
+	for _, name := range []string{
+		"181_prompt_audit.sql",
+		"182_prompt_audit_full_prompt.sql",
+		"224_prompt_audit_enforcement.sql",
+	} {
 		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		require.NoError(t, err)
 		// The migration runner can retry an interrupted deployment; the migration
@@ -60,7 +75,9 @@ func openPromptAuditIntegrationDB(t *testing.T) *sql.DB {
 
 func resetPromptAuditIntegrationDB(t *testing.T, db *sql.DB) {
 	t.Helper()
-	_, err := db.Exec(`TRUNCATE TABLE prompt_audit_events, prompt_audit_jobs, api_keys, users, groups, settings RESTART IDENTITY CASCADE`)
+	_, err := db.Exec(`TRUNCATE TABLE prompt_audit_enforcement_states,prompt_audit_enforcement_actions,
+		prompt_audit_model_attempts,prompt_audit_outcomes,prompt_audit_events,prompt_audit_jobs,api_keys,users,groups,settings
+		RESTART IDENTITY CASCADE`)
 	require.NoError(t, err)
 }
 
@@ -86,8 +103,16 @@ func integrationResult(decision EventDecision) *NormalizedResult {
 		Decision: decision, RiskLevel: RiskLow, Action: ActionAllow, Safety: "Safe",
 		Categories: []string{}, MatchedScanners: []string{}, ScannerScores: map[string]float64{},
 		ScannerEvidence: map[string]string{}, ScannerBackend: "qwen3guard-openai",
-		ScannerVersion: "test", GuardEndpointID: "guard-1", PolicyID: "priority",
+		ScannerVersion: "test", GuardEndpointID: "guard-1", PolicyID: StrategyOrderedAll,
 		PolicyVersion: 1, ChunkTotal: 1, LatencyMS: 2,
+		ModelResults: ModelResults{
+			Aggregation: ModelAggregation{
+				Strategy: AggregationAnyBlock, EnabledModelCount: 1, BlockThreshold: 1,
+				ConfigVersion: 1, PromptContractVersion: PromptContractVersion,
+				AuditPromptHash: promptAuditHash(DefaultAuditPrompt),
+			},
+			Models: []ModelAuditResult{{Sequence: 1, EndpointID: "guard-1", Adapter: AdapterQwen3Guard}},
+		},
 	}
 	if decision != EventPass {
 		result.RiskLevel = RiskCritical
@@ -99,6 +124,14 @@ func integrationResult(decision EventDecision) *NormalizedResult {
 		result.ScannerEvidence["pii"] = "redacted evidence"
 	}
 	return result
+}
+
+func integrationConfig(version int64, storePassEvents bool) ActiveConfig {
+	return ActiveConfig{
+		StorePassEvents: storePassEvents, Strategy: StrategyOrderedAll,
+		AggregationStrategy: AggregationAnyBlock, AuditPrompt: DefaultAuditPrompt,
+		ConfigVersion: version,
+	}
 }
 
 func TestPromptAuditMigrationSchemaAndLeakageGate(t *testing.T) {
@@ -165,7 +198,7 @@ func TestPromptAuditDatabasePersistsFullPromptOnEventsOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, snapshot.RedactedPreview, promptCanary)
 	require.Contains(t, snapshot.FullPrompt, promptCanary)
-	event, err := repo.RecordBlocking(ctx, snapshot.Redacted(), 1, integrationResult(EventCritical), true)
+	event, err := repo.RecordBlocking(ctx, snapshot.Redacted(), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
 	// The event intentionally retains the full prompt for admin review; the
 	// redacted preview and transient job row still never contain it.
@@ -196,6 +229,110 @@ func TestPromptAuditDatabasePersistsFullPromptOnEventsOnly(t *testing.T) {
 	require.Equal(t, stableErrorMessage(code), message)
 	require.NotContains(t, message, errorCanary)
 	require.LessOrEqual(t, len([]rune(message)), 160)
+}
+
+func TestPromptAuditPersistsFailedModelAttemptsAcrossCompletionAndFailure(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	tokenCount := 7
+	failedAttempt := ModelCallAttempt{
+		ModelSequence: 1, CallAttempt: 1, AttemptKind: "initial",
+		EndpointID: "guard-one", Adapter: AdapterOpenAICompatibleQwen, Model: "guard-model",
+		HTTPStatus: http.StatusOK, LatencyMS: 25, InputTokens: &tokenCount,
+		ErrorCode: "invalid_line_count", ResponseBody: `{"invalid":"three lines"}`,
+		ResponseSHA256: strings.Repeat("a", 64), ResponseBytes: 25,
+	}
+
+	result := integrationResult(EventCritical)
+	result.ModelResults.FailedAttempts = []ModelCallAttempt{failedAttempt}
+	completion, err := repo.RecordBlocking(ctx, integrationSnapshot("attempt-complete"), integrationConfig(1, true), result)
+	require.NoError(t, err)
+	require.NotNil(t, completion.Event)
+
+	var storedBody, storedCode string
+	var jobAttempt, modelSequence, callAttempt int
+	require.NoError(t, db.QueryRow(`
+		SELECT job_attempt,model_sequence,call_attempt,error_code,response_body
+		FROM prompt_audit_model_attempts WHERE job_id=$1`, completion.Event.JobID).
+		Scan(&jobAttempt, &modelSequence, &callAttempt, &storedCode, &storedBody))
+	require.Equal(t, []int{1, 1, 1}, []int{jobAttempt, modelSequence, callAttempt})
+	require.Equal(t, "invalid_line_count", storedCode)
+	require.Equal(t, failedAttempt.ResponseBody, storedBody)
+
+	asyncJob, err := repo.CreateStagingWithCapacity(ctx, integrationSnapshot("attempt-fail"), 1, 3, 10)
+	require.NoError(t, err)
+	require.NoError(t, repo.PublishQueued(ctx, asyncJob.ID))
+	claimed, ok, err := repo.ClaimNextJob(ctx, time.Now().Add(time.Second))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, asyncJob.ID, claimed.ID)
+	require.NoError(t, repo.Fail(
+		ctx, claimed.ID, claimed.ClaimVersion, claimed.Attempts,
+		"invalid_line_count", "not persisted", []ModelCallAttempt{failedAttempt},
+	))
+	var status string
+	require.NoError(t, db.QueryRow(`SELECT status FROM prompt_audit_jobs WHERE id=$1`, claimed.ID).Scan(&status))
+	require.Equal(t, "failed", status)
+	require.NoError(t, db.QueryRow(`
+		SELECT response_body FROM prompt_audit_model_attempts WHERE job_id=$1`, claimed.ID).Scan(&storedBody))
+	require.Equal(t, failedAttempt.ResponseBody, storedBody)
+}
+
+func TestPromptAuditBlockingFailureAttemptIdempotencyCascadeAndBodyRetention(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	snapshot := integrationSnapshot("blocking-failed")
+	attempt := ModelCallAttempt{
+		ModelSequence: 1, CallAttempt: 1, AttemptKind: "initial",
+		EndpointID: "guard-one", Adapter: AdapterOpenAICompatibleQwen, Model: "guard-model",
+		HTTPStatus: http.StatusOK, ErrorCode: "invalid_line_count",
+		ResponseBody:   `{"choices":[{"message":{"content":"extra"}}]}`,
+		ResponseSHA256: strings.Repeat("b", 64), ResponseBytes: 49,
+	}
+	require.NoError(t, repo.RecordBlockingFailure(
+		ctx, snapshot, integrationConfig(1, true), "invalid_line_count", []ModelCallAttempt{attempt},
+	))
+
+	var jobID int64
+	var status string
+	require.NoError(t, db.QueryRow(`
+		SELECT id,status FROM prompt_audit_jobs WHERE request_id=$1`, snapshot.RequestID).Scan(&jobID, &status))
+	require.Equal(t, "failed", status)
+	var eventCount, outcomeCount, attemptCount int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_events WHERE job_id=$1`, jobID).Scan(&eventCount))
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_outcomes WHERE job_id=$1`, jobID).Scan(&outcomeCount))
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_model_attempts WHERE job_id=$1`, jobID).Scan(&attemptCount))
+	require.Zero(t, eventCount)
+	require.Zero(t, outcomeCount)
+	require.Equal(t, 1, attemptCount)
+
+	require.NoError(t, insertModelAttempts(ctx, db, jobID, 1, []ModelCallAttempt{attempt}))
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_model_attempts WHERE job_id=$1`, jobID).Scan(&attemptCount))
+	require.Equal(t, 1, attemptCount)
+
+	_, err := db.Exec(`
+		UPDATE prompt_audit_model_attempts
+		SET created_at=NOW()-INTERVAL '31 days'
+		WHERE job_id=$1`, jobID)
+	require.NoError(t, err)
+	purged, err := repo.PurgeExpiredModelAttemptBodies(ctx, time.Now().Add(-30*24*time.Hour), 100)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), purged)
+	var body, hash string
+	var purgedAt sql.NullTime
+	require.NoError(t, db.QueryRow(`
+		SELECT response_body,response_sha256,response_purged_at
+		FROM prompt_audit_model_attempts WHERE job_id=$1`, jobID).Scan(&body, &hash, &purgedAt))
+	require.Empty(t, body)
+	require.Equal(t, attempt.ResponseSHA256, hash)
+	require.True(t, purgedAt.Valid)
+
+	_, err = db.Exec(`DELETE FROM prompt_audit_jobs WHERE id=$1`, jobID)
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_model_attempts WHERE job_id=$1`, jobID).Scan(&attemptCount))
+	require.Zero(t, attemptCount)
 }
 
 func TestPromptAuditRepositoryAdmissionClaimFencingAndEventTransaction(t *testing.T) {
@@ -273,10 +410,10 @@ func TestPromptAuditRepositoryAdmissionClaimFencingAndEventTransaction(t *testin
 	require.True(t, claimed)
 	require.Greater(t, secondClaim.ClaimVersion, firstClaim.ClaimVersion)
 	require.ErrorIs(t, repo.RefreshLease(ctx, firstClaim.ID, firstClaim.ClaimVersion, time.Now()), ErrLeaseLost)
-	_, err = repo.Complete(ctx, firstClaim, integrationResult(EventCritical), true)
+	_, err = repo.Complete(ctx, firstClaim, integrationResult(EventCritical), integrationConfig(1, true))
 	require.ErrorIs(t, err, ErrLeaseLost)
 
-	event, err := repo.Complete(ctx, secondClaim, integrationResult(EventCritical), true)
+	event, err := repo.Complete(ctx, secondClaim, integrationResult(EventCritical), integrationConfig(1, true))
 	require.NoError(t, err)
 	require.NotNil(t, event)
 	var status string
@@ -285,6 +422,9 @@ func TestPromptAuditRepositoryAdmissionClaimFencingAndEventTransaction(t *testin
 	require.Equal(t, "done", status)
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_events WHERE job_id=$1`, secondClaim.ID).Scan(&eventCount))
 	require.Equal(t, 1, eventCount)
+	var outcomeCount int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_outcomes WHERE job_id=$1`, secondClaim.ID).Scan(&outcomeCount))
+	require.Equal(t, 1, outcomeCount)
 
 	staging, err := repo.CreateStagingWithCapacity(ctx, integrationSnapshot("stale"), 1, 3, 10)
 	require.NoError(t, err)
@@ -304,7 +444,7 @@ func TestPromptAuditRepositoryForeignKeysFiltersAndStableIdentitySnapshots(t *te
 	groupID := insertIdentity(t, db, "groups")
 	snapshot := integrationSnapshot("identity")
 	snapshot.UserID, snapshot.APIKeyID, snapshot.GroupID = userID, apiKeyID, &groupID
-	event, err := repo.RecordBlocking(ctx, snapshot, 7, integrationResult(EventCritical), true)
+	event, err := repo.RecordBlocking(ctx, snapshot, integrationConfig(7, true), integrationResult(EventCritical))
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -347,9 +487,9 @@ func TestPromptAuditRepositoryHighWaterAndSafeDeletion(t *testing.T) {
 	db := openPromptAuditIntegrationDB(t)
 	repo := NewPostgreSQLRepository(db)
 	ctx := context.Background()
-	first, err := repo.RecordBlocking(ctx, integrationSnapshot("first"), 1, integrationResult(EventCritical), true)
+	first, err := repo.RecordBlocking(ctx, integrationSnapshot("first"), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
-	second, err := repo.RecordBlocking(ctx, integrationSnapshot("second"), 1, integrationResult(EventCritical), true)
+	second, err := repo.RecordBlocking(ctx, integrationSnapshot("second"), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
 	start, end := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
 	filter := EventFilter{Decision: string(EventCritical), StartAt: &start, EndAt: &end}
@@ -359,12 +499,17 @@ func TestPromptAuditRepositoryHighWaterAndSafeDeletion(t *testing.T) {
 	require.Equal(t, second.ID, preview.SnapshotMaxID)
 	require.Equal(t, FilterHash(preview.FilterSummary, preview.SnapshotMaxID), preview.FilterHash)
 
-	newer, err := repo.RecordBlocking(ctx, integrationSnapshot("newer"), 1, integrationResult(EventCritical), true)
+	newer, err := repo.RecordBlocking(ctx, integrationSnapshot("newer"), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
 	result, err := repo.DeleteEventsByFilter(ctx, filter, preview.SnapshotMaxID, 1)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), result.DeletedEvents)
 	require.Equal(t, int64(2), result.DeletedJobs)
+	for _, outcomeID := range []int64{first.Outcome.ID, second.Outcome.ID} {
+		var outcomeCount int
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_outcomes WHERE id=$1`, outcomeID).Scan(&outcomeCount))
+		require.Equal(t, 1, outcomeCount, "event/job deletion must not change the outcome fact")
+	}
 	_, err = repo.GetEvent(ctx, first.ID)
 	require.ErrorIs(t, err, ErrEventNotFound)
 	_, err = repo.GetEvent(ctx, second.ID)
@@ -372,7 +517,7 @@ func TestPromptAuditRepositoryHighWaterAndSafeDeletion(t *testing.T) {
 	_, err = repo.GetEvent(ctx, newer.ID)
 	require.NoError(t, err, "an event created after preview must survive high-water deletion")
 
-	processingEvent, err := repo.RecordBlocking(ctx, integrationSnapshot("processing"), 1, integrationResult(EventCritical), true)
+	processingEvent, err := repo.RecordBlocking(ctx, integrationSnapshot("processing"), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
 	_, err = db.Exec(`UPDATE prompt_audit_jobs SET status='processing' WHERE id=$1`, processingEvent.JobID)
 	require.NoError(t, err)
@@ -384,15 +529,409 @@ func TestPromptAuditRepositoryHighWaterAndSafeDeletion(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_jobs WHERE id=$1`, processingEvent.JobID).Scan(&remaining))
 	require.Equal(t, 1, remaining, "processing jobs must not be deleted as orphans")
 
-	batchOne, err := repo.RecordBlocking(ctx, integrationSnapshot("batch-one"), 1, integrationResult(EventCritical), true)
+	batchOne, err := repo.RecordBlocking(ctx, integrationSnapshot("batch-one"), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
-	batchTwo, err := repo.RecordBlocking(ctx, integrationSnapshot("batch-two"), 1, integrationResult(EventCritical), true)
+	batchTwo, err := repo.RecordBlocking(ctx, integrationSnapshot("batch-two"), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
 	ids := []int64{batchTwo.ID, batchOne.ID, batchOne.ID}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] > ids[j] })
 	batchResult, err := repo.DeleteEventsByIDs(ctx, ids)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), batchResult.DeletedEvents)
+}
+
+func TestPromptAuditOutcomeExistsWithoutPassEvent(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+
+	completion, err := repo.RecordBlocking(
+		context.Background(),
+		integrationSnapshot("safe-outcome"),
+		integrationConfig(3, false),
+		integrationResult(EventPass),
+	)
+
+	require.NoError(t, err)
+	require.Nil(t, completion.Event)
+	require.NotNil(t, completion.Outcome)
+	require.False(t, completion.Outcome.IsViolation)
+	var eventCount, outcomeCount int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_events WHERE job_id=$1`, completion.Outcome.JobID).Scan(&eventCount))
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM prompt_audit_outcomes WHERE job_id=$1`, completion.Outcome.JobID).Scan(&outcomeCount))
+	require.Zero(t, eventCount)
+	require.Equal(t, 1, outcomeCount)
+}
+
+func TestPromptAuditDeletedUserStillKeepsOutcomeWithoutUserAction(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	var deletedUserID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('deleted-before-complete@example.test','user','active') RETURNING id`).
+		Scan(&deletedUserID))
+	_, err := db.Exec(`DELETE FROM users WHERE id=$1`, deletedUserID)
+	require.NoError(t, err)
+
+	snapshot := integrationSnapshot("deleted-user")
+	snapshot.UserID = deletedUserID
+	snapshot.UsernameSnapshot = "deleted-user"
+	snapshot.UserEmailSnapshot = "deleted-before-complete@example.test"
+	config := integrationConfig(1, true)
+	config.Notifications.AdminEmail = "security@example.test"
+	config.Enforcement.EmailWarning = EmailWarningConfig{
+		Enabled: true, RuleRevision: 1, LookbackCount: 2, ViolationThreshold: 1,
+	}
+	config.Enforcement.AccountDisable = AccountDisableConfig{Enabled: true, ViolationThreshold: 1}
+
+	completion, err := repo.RecordBlocking(ctx, snapshot, config, integrationResult(EventCritical))
+
+	require.NoError(t, err)
+	require.NotNil(t, completion.Event)
+	require.NotNil(t, completion.Outcome)
+	require.Zero(t, completion.Outcome.UserID)
+	require.Equal(t, "deleted-user", completion.Outcome.UsernameSnapshot)
+	var outcomeUserID sql.NullInt64
+	require.NoError(t, db.QueryRow(`
+		SELECT user_id FROM prompt_audit_outcomes WHERE id=$1`, completion.Outcome.ID).Scan(&outcomeUserID))
+	require.False(t, outcomeUserID.Valid)
+	var stateCount, actionCount int
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_states WHERE user_id=$1`, deletedUserID).Scan(&stateCount))
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_actions WHERE user_id=$1`, deletedUserID).Scan(&actionCount))
+	require.Zero(t, stateCount)
+	require.Zero(t, actionCount)
+}
+
+func TestPromptAuditEmailWindowEdgeAndAccountDisablePriority(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+
+	var warningUserID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('warning@example.test','user','active') RETURNING id`).
+		Scan(&warningUserID))
+	warningConfig := integrationConfig(1, false)
+	warningConfig.Notifications.AdminEmail = "security@example.test"
+	warningConfig.Enforcement.EmailWarning = EmailWarningConfig{
+		Enabled: true, RuleRevision: 1, LookbackCount: 3, ViolationThreshold: 2,
+	}
+	const promptCanary = "ENFORCEMENT_PROMPT_CANARY_DO_NOT_COPY"
+	record := func(seed string, userID int64, cfg ActiveConfig, decision EventDecision) *CompletionResult {
+		t.Helper()
+		snapshot := integrationSnapshot(seed)
+		snapshot.UserID = userID
+		snapshot.FullPrompt = promptCanary + "-" + seed
+		completion, err := repo.RecordBlocking(ctx, snapshot, cfg, integrationResult(decision))
+		require.NoError(t, err)
+		return completion
+	}
+	record("warning-v1", warningUserID, warningConfig, EventCritical)
+	record("warning-v2", warningUserID, warningConfig, EventCritical)
+	record("warning-v3", warningUserID, warningConfig, EventCritical)
+	var warningCount int
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_actions
+		WHERE user_id=$1 AND action_type='email_warning'`, warningUserID).Scan(&warningCount))
+	require.Equal(t, 1, warningCount, "remaining above the threshold must not repeat the warning")
+
+	record("warning-p1", warningUserID, warningConfig, EventPass)
+	record("warning-p2", warningUserID, warningConfig, EventPass)
+	record("warning-v4", warningUserID, warningConfig, EventCritical)
+	record("warning-v5", warningUserID, warningConfig, EventCritical)
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_actions
+		WHERE user_id=$1 AND action_type='email_warning'`, warningUserID).Scan(&warningCount))
+	require.Equal(t, 2, warningCount, "dropping below the threshold must re-arm the edge")
+
+	var disabledUserID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('disabled@example.test','user','active') RETURNING id`).
+		Scan(&disabledUserID))
+	disableConfig := integrationConfig(1, false)
+	disableConfig.Notifications.AdminEmail = "security@example.test"
+	disableConfig.Enforcement.EmailWarning = EmailWarningConfig{
+		Enabled: true, RuleRevision: 1, LookbackCount: 2, ViolationThreshold: 2,
+	}
+	disableConfig.Enforcement.AccountDisable = AccountDisableConfig{Enabled: true, ViolationThreshold: 2}
+	record("disable-v1", disabledUserID, disableConfig, EventCritical)
+	second := record("disable-v2", disabledUserID, disableConfig, EventCritical)
+	require.Equal(t, disabledUserID, second.DisabledUserID)
+	var status string
+	require.NoError(t, db.QueryRow(`SELECT status FROM users WHERE id=$1`, disabledUserID).Scan(&status))
+	require.Equal(t, "disabled", status)
+	var emailActions, disableActions int
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FILTER (WHERE action_type='email_warning'),
+			COUNT(*) FILTER (WHERE action_type='account_disabled')
+		FROM prompt_audit_enforcement_actions WHERE user_id=$1`, disabledUserID).
+		Scan(&emailActions, &disableActions))
+	require.Zero(t, emailActions, "the same outcome must prefer account_disabled")
+	require.Equal(t, 1, disableActions)
+
+	third := record("disable-v3", disabledUserID, disableConfig, EventCritical)
+	require.Zero(t, third.DisabledUserID)
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_actions
+		WHERE user_id=$1 AND action_type='account_disabled'`, disabledUserID).Scan(&disableActions))
+	require.Equal(t, 1, disableActions, "an already-disabled user must not create another disable action")
+
+	var outcomeJSON, actionJSON, stateJSON string
+	require.NoError(t, db.QueryRow(`
+		SELECT row_to_json(o)::text FROM prompt_audit_outcomes o WHERE id=$1`, second.Outcome.ID).Scan(&outcomeJSON))
+	require.NoError(t, db.QueryRow(`
+		SELECT row_to_json(a)::text FROM prompt_audit_enforcement_actions a
+		WHERE user_id=$1 AND action_type='account_disabled'`, disabledUserID).Scan(&actionJSON))
+	require.NoError(t, db.QueryRow(`
+		SELECT row_to_json(s)::text FROM prompt_audit_enforcement_states s WHERE user_id=$1`, disabledUserID).Scan(&stateJSON))
+	for _, stored := range []string{outcomeJSON, actionJSON, stateJSON} {
+		require.NotContains(t, stored, promptCanary)
+		require.NotContains(t, stored, DefaultAuditPrompt)
+		require.NotContains(t, stored, FixedOutputPrompt)
+	}
+}
+
+func TestPromptAuditSingleUserReenableResetsOnlyDisableCounter(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+
+	var userID, otherUserID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('reset@example.test','user','active') RETURNING id`).
+		Scan(&userID))
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('other-reset@example.test','user','active') RETURNING id`).
+		Scan(&otherUserID))
+	config := integrationConfig(1, false)
+	config.Notifications.AdminEmail = "security@example.test"
+	config.Enforcement.EmailWarning = EmailWarningConfig{
+		Enabled: true, RuleRevision: 1, LookbackCount: 3, ViolationThreshold: 2,
+	}
+	config.Enforcement.AccountDisable = AccountDisableConfig{Enabled: true, ViolationThreshold: 1}
+	snapshot := integrationSnapshot("reset-user")
+	snapshot.UserID = userID
+	snapshot.UserEmailSnapshot = "reset@example.test"
+	completion, err := repo.RecordBlocking(ctx, snapshot, config, integrationResult(EventCritical))
+	require.NoError(t, err)
+	require.Equal(t, userID, completion.DisabledUserID)
+
+	_, err = db.Exec(`
+		INSERT INTO prompt_audit_enforcement_states (user_id,disable_violation_count)
+		VALUES ($1,4) ON CONFLICT (user_id)
+		DO UPDATE SET disable_violation_count=EXCLUDED.disable_violation_count`, otherUserID)
+	require.NoError(t, err)
+
+	var beforeRevision, beforeWindowStart int64
+	var beforeArmed bool
+	require.NoError(t, db.QueryRow(`
+		SELECT email_rule_revision,email_window_start_outcome_id,email_rule_armed
+		FROM prompt_audit_enforcement_states WHERE user_id=$1`, userID).
+		Scan(&beforeRevision, &beforeWindowStart, &beforeArmed))
+
+	entClient := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	tx, err := entClient.Tx(ctx)
+	require.NoError(t, err)
+	txCtx := dbent.NewTxContext(ctx, tx)
+	require.NoError(t, repo.ResetDisableCounter(txCtx, appservice.PromptAuditCounterResetInput{
+		UserID: userID, Username: "reset-user", UserEmail: "reset@example.test",
+	}))
+	_, err = tx.Client().ExecContext(txCtx, `UPDATE users SET status='active',updated_at=NOW() WHERE id=$1`, userID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	var status string
+	var disableCount int
+	var resetOutcomeID, afterRevision, afterWindowStart int64
+	var afterArmed bool
+	require.NoError(t, db.QueryRow(`SELECT status FROM users WHERE id=$1`, userID).Scan(&status))
+	require.NoError(t, db.QueryRow(`
+		SELECT disable_violation_count,disable_reset_outcome_id,
+			email_rule_revision,email_window_start_outcome_id,email_rule_armed
+		FROM prompt_audit_enforcement_states WHERE user_id=$1`, userID).
+		Scan(&disableCount, &resetOutcomeID, &afterRevision, &afterWindowStart, &afterArmed))
+	require.Equal(t, "active", status)
+	require.Zero(t, disableCount)
+	require.Equal(t, completion.Outcome.ID, resetOutcomeID)
+	require.Equal(t, beforeRevision, afterRevision)
+	require.Equal(t, beforeWindowStart, afterWindowStart)
+	require.Equal(t, beforeArmed, afterArmed)
+
+	var otherDisableCount, resetActions, outcomeCount int
+	require.NoError(t, db.QueryRow(`
+		SELECT disable_violation_count FROM prompt_audit_enforcement_states WHERE user_id=$1`, otherUserID).
+		Scan(&otherDisableCount))
+	require.Equal(t, 4, otherDisableCount)
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_actions
+		WHERE user_id=$1 AND action_type='counter_reset'`, userID).Scan(&resetActions))
+	require.Equal(t, 1, resetActions)
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_outcomes WHERE user_id=$1`, userID).Scan(&outcomeCount))
+	require.Equal(t, 1, outcomeCount)
+}
+
+func TestPromptAuditNotificationRecipientsRetryIndependently(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	var userID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('mail-retry@example.test','user','active') RETURNING id`).
+		Scan(&userID))
+	config := integrationConfig(1, false)
+	config.Notifications.AdminEmail = "security@example.test"
+	config.Enforcement.AccountDisable = AccountDisableConfig{Enabled: true, ViolationThreshold: 1}
+	snapshot := integrationSnapshot("mail-retry")
+	snapshot.UserID = userID
+	snapshot.UserEmailSnapshot = "mail-retry@example.test"
+	completion, err := repo.RecordBlocking(ctx, snapshot, config, integrationResult(EventCritical))
+	require.NoError(t, err)
+
+	var actionID int64
+	require.NoError(t, db.QueryRow(`
+		SELECT id FROM prompt_audit_enforcement_actions
+		WHERE trigger_outcome_id=$1 AND action_type='account_disabled'`, completion.Outcome.ID).
+		Scan(&actionID))
+	now := time.Now().UTC()
+	require.NoError(t, repo.finishNotificationRecipient(ctx, actionID, "admin", nil, now))
+	require.NoError(t, repo.finishNotificationRecipient(
+		ctx, actionID, "user", errors.New("simulated delivery failure"), now,
+	))
+
+	var adminStatus, userStatus, lastError string
+	var adminAttempts, userAttempts int
+	require.NoError(t, db.QueryRow(`
+		SELECT admin_email_status,user_email_status,admin_email_attempts,user_email_attempts,last_error
+		FROM prompt_audit_enforcement_actions WHERE id=$1`, actionID).
+		Scan(&adminStatus, &userStatus, &adminAttempts, &userAttempts, &lastError))
+	require.Equal(t, "sent", adminStatus)
+	require.Equal(t, "failed", userStatus)
+	require.Equal(t, 1, adminAttempts)
+	require.Equal(t, 1, userAttempts)
+	require.Equal(t, "user_email_delivery_failed", lastError)
+
+	delivery, found, err := repo.claimNotificationDelivery(ctx, now.Add(2*time.Minute))
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, actionID, delivery.ActionID)
+	require.Equal(t, "sent", delivery.AdminEmailStatus)
+	require.Equal(t, "failed", delivery.UserEmailStatus)
+	require.NoError(t, repo.finishNotificationRecipient(ctx, actionID, "user", nil, now.Add(2*time.Minute)))
+
+	var completedAt sql.NullTime
+	require.NoError(t, db.QueryRow(`
+		SELECT admin_email_status,user_email_status,admin_email_attempts,user_email_attempts,
+			last_error,completed_at
+		FROM prompt_audit_enforcement_actions WHERE id=$1`, actionID).
+		Scan(&adminStatus, &userStatus, &adminAttempts, &userAttempts, &lastError, &completedAt))
+	require.Equal(t, "sent", adminStatus)
+	require.Equal(t, "sent", userStatus)
+	require.Equal(t, 1, adminAttempts, "a successful recipient must not be retried")
+	require.Equal(t, 2, userAttempts)
+	require.Empty(t, lastError)
+	require.True(t, completedAt.Valid)
+
+	var noEmailUserID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('','user','active') RETURNING id`).
+		Scan(&noEmailUserID))
+	noEmailSnapshot := integrationSnapshot("no-user-email")
+	noEmailSnapshot.UserID = noEmailUserID
+	noEmailSnapshot.UserEmailSnapshot = ""
+	noEmailCompletion, err := repo.RecordBlocking(ctx, noEmailSnapshot, config, integrationResult(EventCritical))
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRow(`
+		SELECT user_email_status,last_error
+		FROM prompt_audit_enforcement_actions
+		WHERE trigger_outcome_id=$1 AND action_type='account_disabled'`, noEmailCompletion.Outcome.ID).
+		Scan(&userStatus, &lastError))
+	require.Equal(t, "not_required", userStatus)
+	require.Equal(t, "user_email_missing", lastError)
+}
+
+func TestPromptAuditConcurrentOutcomesKeepAccurateCounterAndSingleDisableAction(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	var userID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('concurrent-enforcement@example.test','user','active') RETURNING id`).
+		Scan(&userID))
+	config := integrationConfig(1, false)
+	config.Notifications.AdminEmail = "security@example.test"
+	config.Enforcement.AccountDisable = AccountDisableConfig{Enabled: true, ViolationThreshold: 4}
+
+	const requestCount = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, requestCount)
+	for index := 0; index < requestCount; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			snapshot := integrationSnapshot(fmt.Sprintf("concurrent-%02d", index))
+			snapshot.UserID = userID
+			snapshot.UserEmailSnapshot = "concurrent-enforcement@example.test"
+			_, recordErr := repo.RecordBlocking(ctx, snapshot, config, integrationResult(EventCritical))
+			errs <- recordErr
+		}(index)
+	}
+	wg.Wait()
+	close(errs)
+	for recordErr := range errs {
+		require.NoError(t, recordErr)
+	}
+
+	var status string
+	var disableCount, outcomeCount, actionCount int
+	require.NoError(t, db.QueryRow(`SELECT status FROM users WHERE id=$1`, userID).Scan(&status))
+	require.NoError(t, db.QueryRow(`
+		SELECT disable_violation_count FROM prompt_audit_enforcement_states WHERE user_id=$1`, userID).
+		Scan(&disableCount))
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_outcomes WHERE user_id=$1`, userID).Scan(&outcomeCount))
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_actions
+		WHERE user_id=$1 AND action_type='account_disabled'`, userID).Scan(&actionCount))
+	require.Equal(t, "disabled", status)
+	require.Equal(t, requestCount, disableCount)
+	require.Equal(t, requestCount, outcomeCount)
+	require.Equal(t, 1, actionCount)
+}
+
+func TestPromptAuditAdminNeverAccumulatesOrAutoDisables(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	var adminID int64
+	require.NoError(t, db.QueryRow(`
+		INSERT INTO users(email,role,status) VALUES ('prompt-admin@example.test','admin','active') RETURNING id`).
+		Scan(&adminID))
+	config := integrationConfig(1, false)
+	config.Notifications.AdminEmail = "security@example.test"
+	config.Enforcement.AccountDisable = AccountDisableConfig{Enabled: true, ViolationThreshold: 1}
+	snapshot := integrationSnapshot("admin-safe")
+	snapshot.UserID = adminID
+	snapshot.UserEmailSnapshot = "prompt-admin@example.test"
+
+	completion, err := repo.RecordBlocking(ctx, snapshot, config, integrationResult(EventCritical))
+
+	require.NoError(t, err)
+	require.Zero(t, completion.DisabledUserID)
+	var status string
+	var disableCount, disableActions int
+	require.NoError(t, db.QueryRow(`SELECT status FROM users WHERE id=$1`, adminID).Scan(&status))
+	require.NoError(t, db.QueryRow(`
+		SELECT disable_violation_count FROM prompt_audit_enforcement_states WHERE user_id=$1`, adminID).
+		Scan(&disableCount))
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM prompt_audit_enforcement_actions
+		WHERE user_id=$1 AND action_type='account_disabled'`, adminID).Scan(&disableActions))
+	require.Equal(t, "active", status)
+	require.Zero(t, disableCount)
+	require.Zero(t, disableActions)
 }
 
 func TestPromptAuditServiceConfirmationKeepsPostPreviewEventsAndConcurrentDeletesAreSafe(t *testing.T) {
@@ -404,7 +943,7 @@ func TestPromptAuditServiceConfirmationKeepsPostPreviewEventsAndConcurrentDelete
 	filter := EventFilter{Decision: string(EventCritical), StartAt: &start, EndAt: &end}
 
 	for i := 0; i < 12; i++ {
-		_, err := repo.RecordBlocking(ctx, integrationSnapshot(fmt.Sprintf("event-%02d", i)), 1, integrationResult(EventCritical), true)
+		_, err := repo.RecordBlocking(ctx, integrationSnapshot(fmt.Sprintf("event-%02d", i)), integrationConfig(1, true), integrationResult(EventCritical))
 		require.NoError(t, err)
 	}
 	service := &PromptService{
@@ -414,7 +953,7 @@ func TestPromptAuditServiceConfirmationKeepsPostPreviewEventsAndConcurrentDelete
 	require.NoError(t, err)
 	require.Equal(t, int64(12), preview.MatchedCount)
 
-	newer, err := repo.RecordBlocking(ctx, integrationSnapshot("post-preview"), 1, integrationResult(EventCritical), true)
+	newer, err := repo.RecordBlocking(ctx, integrationSnapshot("post-preview"), integrationConfig(1, true), integrationResult(EventCritical))
 	require.NoError(t, err)
 	result, err := service.DeleteByFilter(ctx, DeleteByFilterRequest{
 		Filter: filter, SnapshotMaxID: preview.SnapshotMaxID, FilterHash: preview.FilterHash,
@@ -427,7 +966,7 @@ func TestPromptAuditServiceConfirmationKeepsPostPreviewEventsAndConcurrentDelete
 
 	resetPromptAuditIntegrationDB(t, db)
 	for i := 0; i < 24; i++ {
-		_, err := repo.RecordBlocking(ctx, integrationSnapshot(fmt.Sprintf("race-%02d", i)), 1, integrationResult(EventCritical), true)
+		_, err := repo.RecordBlocking(ctx, integrationSnapshot(fmt.Sprintf("race-%02d", i)), integrationConfig(1, true), integrationResult(EventCritical))
 		require.NoError(t, err)
 	}
 	preview, err = repo.PreviewDelete(ctx, filter)

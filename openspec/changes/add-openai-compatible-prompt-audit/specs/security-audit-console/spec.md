@@ -1,160 +1,155 @@
 ## ADDED Requirements
 
-### Requirement: 管理台必须提供安全审计分组和独立提示词审计页面
-控制台 SHALL 把安全相关的内容审核页面组织到“安全审计”导航分组中，并新增独立“提示词审计”页面。原 `/admin/risk-control` 路由、页面状态和功能 MUST 保持兼容；新页面路由 MUST 为 `/admin/prompt-audit` 或经实现评审确认的等价稳定路由。
+### Requirement: 管理台必须保留安全审计分组与独立页面
+控制台 SHALL 在“安全审计”分组中保留现有内容审核，并提供 /admin/prompt-audit。risk_control_enabled=false 时按既有 feature policy 隐藏/停用入口，但 MUST 不删除配置或历史事实。
 
-#### Scenario: 管理员查看侧栏
-- **WHEN** 管理员已登录且 risk_control_enabled=true
-- **THEN** 侧栏 MUST 展示“安全审计”可展开分组
-- **THEN** 分组 MUST 至少包含“内容审核”和“提示词审计”两个子入口
+#### Scenario: 管理员查看导航
+- **WHEN** 管理员登录且 risk_control_enabled=true
+- **THEN** 安全审计分组 MUST 同时包含内容审核与提示词审计
+- **THEN** /admin/risk-control 原页面与功能 MUST 保持兼容
 
-#### Scenario: 管理员打开原内容审核页面
-- **WHEN** 管理员访问 `/admin/risk-control`
-- **THEN** 页面 MUST 继续展示原有 Moderations、关键词、Hash、封号、邮件和记录功能
-- **THEN** 页面 MUST NOT 被提示词审计配置或事件替换
+### Requirement: 配置页必须按最终业务顺序组织
+Prompt Audit 配置区 SHALL 依次展示运行概览、已添加审核模型、第三方模型审核提示词、审计策略、阈值处置与通知；审核事件继续位于同一工作区的独立页签。
 
-#### Scenario: 功能总开关关闭
-- **WHEN** risk_control_enabled=false
-- **THEN** 安全审计导航和提示词审计网关执行 MUST 按现有功能开关策略停用
-- **THEN** 已存储的配置和历史事件 MUST 不被删除
+#### Scenario: 初次加载
+- **WHEN** 管理员打开页面
+- **THEN** 配置、Runtime、分组和 Event MUST 独立加载
+- **THEN** 某一接口失败 MUST 不导致其他区域白屏
 
-### Requirement: 提示词审计页面必须提供清晰的独立工作区
-页面 SHALL 在同一工作区展示运行概览、审计池、审计策略、事件列表和固定保存操作区。页面 MUST 清楚区分“异步只审计”和“同步阻止”，并 MUST 展示未保存状态和最终生效状态。
+#### Scenario: 草稿未保存
+- **WHEN** 管理员修改可编辑配置
+- **THEN** 页面 MUST 显示未保存状态
+- **THEN** Runtime MUST 继续显示服务端 active/expected version，而不是草稿
 
-#### Scenario: 初次打开页面
-- **WHEN** 管理员打开提示词审计页面
-- **THEN** 页面 MUST 并行或有界加载配置、运行态、分组列表和事件列表
-- **THEN** 页面 MUST 展示有效模式、Worker 状态、队列状态、节点连通性和最近错误
+### Requirement: 审核模型列表必须支持 adapter、顺序与独立 timeout
+EndpointPool SHALL 展示顺序、开关、名称、模型、adapter、timeout、凭据状态和 probe，并支持新增、编辑、删除、上移、下移。页面 MUST 不提供 input_limit、Token 上限、思考等级、response schema 或拖拽依赖。
 
-#### Scenario: 修改但未保存配置
-- **WHEN** 管理员修改审计池、分类、范围或模式开关
-- **THEN** 页面 MUST 显示“有未保存的更改”
-- **THEN** 运行态 MUST 继续标识服务端当前生效版本，不能把草稿显示为已生效
+#### Scenario: 上移或下移
+- **WHEN** 管理员点击上移/下移
+- **THEN** 页面 MUST 只重排 endpoint 数组
+- **THEN** 其他字段 MUST 保持不变
+- **THEN** 新模型 MUST 默认追加到列表尾部
 
-### Requirement: 页面必须支持完整审计池管理和真实探测
-页面 SHALL 支持新增、编辑、启用、禁用和删除审计池，并允许配置 Base URL、API Key、Model、超时和 input_limit。API Key 已保存后 MUST 只显示配置状态，不能回显明文。
+#### Scenario: 编辑凭据
+- **WHEN** 已保存节点拥有 Token
+- **THEN** 输入框 MUST 为空并显示 has_token/token_status
+- **THEN** 空输入保存 MUST 保留密文，显式 clear_token 才能清除
+- **THEN** Token MUST 不进入 localStorage、sessionStorage、URL、console 或持久前端状态
 
-#### Scenario: 编辑已保存节点
-- **WHEN** 管理员打开已配置 API Key 的节点
-- **THEN** API Key 输入框 MUST 为空或显示不可逆占位状态
-- **THEN** 未填写新 Key 保存时 MUST 保留原密文
-- **THEN** 页面 MUST 提供显式清除凭据操作
+#### Scenario: 选择 adapter
+- **WHEN** 管理员编辑节点
+- **THEN** adapter 文案 MUST 为“Qwen3Guard”或“第三方 OpenAI-compatible（Qwen 两行格式）”
 
-#### Scenario: 执行连接测试
-- **WHEN** 管理员点击节点“连接测试”
-- **THEN** 页面 MUST 展示配置校验、发送请求、服务响应和测试结论状态
-- **THEN** 结果 MUST 展示耗时、HTTP 状态、稳定错误码和脱敏消息
+### Requirement: 页面必须区分可编辑审核提示词与只读固定协议
+AuditPromptPanel SHALL 使用可编辑 textarea 绑定 audit_prompt，并使用不可编辑 pre/code 展示后端 prompt_contract.fixed_output_prompt。前端 MUST 不硬编码另一份固定协议。
 
-### Requirement: 页面必须支持审计范围和九类风险配置
-页面 SHALL 支持全部分组或指定 group ID 范围，并展示九类 Qwen3Guard 风险分类。页面 MUST 使用目标项目真实分组数据，已删除但仍存在于配置中的分组 MUST 显示为失效项而不是被静默丢弃。
+#### Scenario: 第三方提示词为空
+- **WHEN** 至少一个启用模型使用 openai_compatible_qwen 且 audit_prompt 为空
+- **THEN** 页面 MUST 显示可行动的校验错误
+- **THEN** 后端保存和 Probe 仍 MUST 做最终校验
 
-#### Scenario: 选择指定分组
-- **WHEN** 管理员把范围切换为 selected 并选择一个或多个分组
-- **THEN** 保存载荷 MUST 使用稳定 group ID
-- **THEN** 页面 MUST 展示已选数量并支持搜索
+#### Scenario: 固定协议变化
+- **WHEN** GET config 返回新的 prompt_contract
+- **THEN** 页面 MUST 更新只读展示
+- **THEN** dirty fingerprint MUST 不变化
+- **THEN** buildUpdateRequest MUST 不包含 prompt_contract
 
-#### Scenario: 查看风险分类
-- **WHEN** 管理员查看扫描器配置
-- **THEN** 页面 MUST 展示 Violent、Non-violent Illegal Acts、Sexual Content or Sexual Acts、PII、Suicide & Self-Harm、Unethical Acts、Politically Sensitive Topics、Copyright Violation、Jailbreak
+### Requirement: 页面必须配置三种聚合并实时显示门槛
+PolicyPanel SHALL 支持 any_block、majority_block 和 all_block，并根据当前启用模型数实时展示 N 与门槛。页面 MUST 说明所有启用模型按顺序执行，顺序不代表权重且达到门槛后不会早停。
 
-### Requirement: 开启同步阻止必须有明确的风险确认
-页面 SHALL 把 enabled、blocking_enabled 和 store_pass_events 作为独立开关。关闭 enabled 时 MUST 自动关闭并禁用 blocking_enabled；开启 blocking_enabled 时 MUST 展示二次确认，说明请求延迟、Block 和 Guard 不可用的 fail-closed 行为。
+#### Scenario: 选择多数阻断
+- **WHEN** 有 4 个启用模型且管理员选择 majority_block
+- **THEN** 页面 MUST 显示阻断门槛 3
 
-#### Scenario: 开启同步阻止
-- **WHEN** 管理员把 blocking_enabled 从 false 切换为 true
-- **THEN** 页面 MUST 在保存前展示风险确认
-- **THEN** 确认文案 MUST 说明请求会等待 Guard，Block 或 Guard 不可用时不会访问上游
+#### Scenario: 禁用一个模型
+- **WHEN** 启用模型数从 4 变为 3
+- **THEN** 页面 MUST 立即把多数阻断门槛更新为 2
 
-#### Scenario: 关闭审计总开关
-- **WHEN** 管理员关闭 enabled
-- **THEN** 页面草稿 MUST 同时把 blocking_enabled 设为 false
+### Requirement: 页面必须支持阈值处置与通知
+EnforcementPanel SHALL 提供管理员邮箱、普通邮件提醒独立开关及最近 N/违规 M、自动停用独立开关及累计 M。文案 MUST 区分最近窗口与“自上次单账号启用重置后累计”。
 
-### Requirement: 配置保存必须可验证且不得泄露凭据
-页面 SHALL 通过一个统一保存动作提交完整规范化配置。保存成功后 MUST 用后端返回值刷新页面快照、清除已提交 API Key 明文并显示 config_version；保存失败 MUST 保留草稿并展示稳定错误信息。
+#### Scenario: 查看普通提醒
+- **WHEN** 管理员开启 email_warning
+- **THEN** 页面 MUST 说明只在最近窗口越过阈值边沿时提醒
+
+#### Scenario: 查看自动停用
+- **WHEN** 管理员开启 account_disable
+- **THEN** 页面 MUST 说明累计口径和单账号重置
+- **THEN** 页面 MUST 说明停用邮件不受普通提醒开关影响
+
+### Requirement: 开启 blocking 必须明确确认
+enabled、blocking_enabled、blocking_latest_turn_only 与 store_pass_events SHALL 保持独立草稿字段。关闭 enabled MUST 同时关闭并禁用 blocking；从 false 开启 blocking MUST 二次确认 fail-closed 风险。
+
+#### Scenario: 开启同步门禁
+- **WHEN** 管理员开启 blocking
+- **THEN** 确认文案 MUST 说明请求等待所有启用模型，Block 或未达门槛的模型失败不会访问上游
+
+### Requirement: 保存与 Probe 必须使用当前草稿且不得泄密
+统一保存动作 SHALL 提交完整规范化 Update DTO，并在成功后以 Public DTO 重建草稿和清除明文 Token。Probe 第三方模型时 MUST 同时提交当前草稿 audit_prompt。
 
 #### Scenario: 保存成功
-- **WHEN** 后端成功保存配置
-- **THEN** 页面 MUST 显示配置已同步和新的 config_version
-- **THEN** 浏览器状态、调试日志和缓存 MUST 不再保留刚提交的 API Key 明文
+- **WHEN** PUT config 成功
+- **THEN** 页面 MUST 显示新 config_version 与已同步状态
+- **THEN** 已提交 Token MUST 从组件状态与渲染 HTML 中消失
 
-#### Scenario: 保存校验失败
-- **WHEN** 后端返回节点地址、模式组合或策略校验错误
-- **THEN** 页面 MUST 保留用户草稿
-- **THEN** 页面 MUST 展示稳定错误码及可行动的中文说明
+#### Scenario: 配置冲突
+- **WHEN** 后端返回 409 prompt_audit_config_conflict
+- **THEN** 页面 MUST 保留本地草稿并提示服务端已变化
+- **THEN** 页面 MUST 不自动覆盖新服务端配置
 
-#### Scenario: 配置被其他管理员更新
-- **WHEN** 保存返回 409 `prompt_audit_config_conflict`
-- **THEN** 页面 MUST 保留本地草稿并提示服务端配置已变化
-- **THEN** 页面 MUST 提供重新加载/对比入口，不得自动用旧草稿覆盖新配置
+#### Scenario: Probe 输出协议错误
+- **WHEN** 第三方模型连接成功但两行输出非法
+- **THEN** 页面 MUST 展示实际 HTTP status 与稳定协议错误
+- **THEN** 页面 MUST 不把它显示为网络连接失败
 
-### Requirement: 页面必须展示真实运行态和同步 Guard 指标
-页面 SHALL 展示 process_status、Worker 总数/活动数、队列容量/长度、queued/processing/done/failed 数、处理/失败总数、最近时间、节点连通性、配置版本一致性、Redis Payload Store 状态和同步 Guard Allow/Flag/Block/Unavailable/timeout/failover/bulkhead 指标。
+### Requirement: Runtime 必须展示每模型与整条评估
+RuntimeOverview SHALL 展示每模型顺序、启用状态、adapter/model、timeout、probe、请求、Pass/Flag/Critical/error、输入/输出/reasoning Token 和 P50/P95；还 SHALL 展示整条 evaluation total/partial failure/P50/P95、聚合策略、模型快照数、门槛、协议版本、audit_prompt hash 以及 Outcome/违规/提醒/停用/邮件失败累计。
 
-#### Scenario: 配置版本未同步
-- **WHEN** expected_config_version 与 active_config_version 不一致
-- **THEN** 页面 MUST 显示明确的配置未同步或加载中状态
-- **THEN** 页面 MUST 展示最近加载错误和时间（如存在）
+#### Scenario: 查看 ordered-all 状态
+- **WHEN** Runtime 返回多个模型
+- **THEN** 页面 MUST 按后端 sequence 展示
+- **THEN** 页面 MUST 不再把 failover 作为模型执行说明
 
-#### Scenario: Worker 心跳过期
-- **WHEN** heartbeat_at 超过后端定义的健康窗口
-- **THEN** 页面 MUST 显示 stale 而不是 running
+### Requirement: Event 详情必须展示每模型脱敏结果
+EventDetailDialog SHALL 展示完整管理员复核 Prompt、最终聚合摘要、风险摘要和 model_results。每模型行 MUST 包含 Safety、Categories、decision/action、latency、usage 与 error_code，但 MUST 不展示模型完整响应或 reasoning content。
 
-### Requirement: 页面必须提供可复核的事件列表和详情
-页面 SHALL 提供事件分页、总数、decision/risk/endpoint/group/user/API key/request ID/prompt Hash/关键字/时间范围筛选、行选择和详情抽屉或弹窗。详情 MUST 只展示脱敏数据。
+#### Scenario: 部分模型失败
+- **WHEN** Event.model_results.aggregation.partial_failure=true
+- **THEN** 技术信息 MUST 明确标识部分失败、模型数和门槛
+- **THEN** 失败模型 MUST 展示稳定 error_code，成功模型仍展示分类
 
-#### Scenario: 查看事件列表
-- **WHEN** 管理员应用筛选
-- **THEN** 表格 MUST 展示时间、用户/API key、分组、入口/模型、判定、风险、分类、预览和操作
+#### Scenario: 完整 Prompt 复核
+- **WHEN** Event 拥有 full_prompt
+- **THEN** 页面 MAY 向管理员展示该敏感文本并提供明确保密提示
+- **THEN** 页面 MUST 不把它复制到 Runtime、邮件或普通日志
 
-#### Scenario: 查看事件详情
-- **WHEN** 管理员打开一条事件
-- **THEN** 页面 MUST 展示脱敏预览、审计摘要、结构化返回、具体风险摘要和技术信息
-- **THEN** 页面 MUST 提供 request ID、prompt Hash、scanner、策略、节点、配置版本、分片数和耗时
-- **THEN** 页面 MUST 不展示完整提示词或节点 API Key
+### Requirement: 用户启用必须复用现有单账号入口
+UsersView SHALL 继续使用普通用户行的“启用”按钮和 PUT /api/v1/admin/users/:id，不得增加第二个 Prompt Audit 重置请求或批量入口。
 
-#### Scenario: 复核用户身份和具体风险
-- **WHEN** 事件拥有用户名、用户邮箱、API Key 名称和一个或多个风险分类
-- **THEN** 页面 MUST 将用户名、邮箱和 API Key 名称分列展示并提供独立复制操作
-- **THEN** 页面 MUST 为每个风险展示 category、标题、说明、严重度、动作、scanner、score 和脱敏证据摘要
-- **THEN** 用户不存在或字段为空时 MUST 显示稳定 fallback，而不是把其他身份字段冒充为该字段
+#### Scenario: 普通用户启用成功
+- **WHEN** 后端完成 disabled→active 与停用累计重置
+- **THEN** 页面 MUST 显示统一成功提示，说明累计已重置
+- **THEN** 页面 MUST 只发送一次用户更新请求
 
-### Requirement: 页面必须提供防误操作的事件删除流程
-页面 SHALL 支持单条删除、选中项批量删除和按筛选删除。按筛选删除 MUST 先调用预览接口，并要求明确时间范围、matched_count、snapshot_max_id、filter_hash、服务端认证 confirmation_token 和二次确认。
+### Requirement: Event 删除必须防误操作且不暗示删除 Outcome
+页面 SHALL 保留单条、选中批量和按筛选删除。筛选删除使用服务端预览、snapshot_max_id、filter_hash、confirmation_token 与 confirm=true；筛选变化必须废弃旧预览。
 
-#### Scenario: 单条删除
-- **WHEN** 管理员确认删除一条事件
-- **THEN** 页面 MUST 调用单条删除接口并在成功后刷新列表与运行统计
+#### Scenario: 确认筛选删除
+- **WHEN** 管理员确认有效预览
+- **THEN** 页面 MUST 只提交 Event 删除契约
+- **THEN** 文案 MUST 不声称 Outcome、State 或 Action 被删除
 
-#### Scenario: 按筛选删除
-- **WHEN** 管理员已设置明确时间范围并请求按筛选删除
-- **THEN** 页面 MUST 先展示匹配数量和规范化筛选摘要
-- **THEN** 只有管理员再次确认后才能提交 filter_hash、confirmation_token 和 confirm=true
+### Requirement: 管理操作审计必须使用安全摘要
+配置写入、Probe 和 Event 删除 SHALL 复用现有管理员审计。配置摘要 MAY 包含开关、config version、endpoint/启用/第三方模型数量、聚合策略、分类/分组数量、规则开关和阈值，但 MUST 不包含 audit_prompt、固定协议全文、管理员邮箱原文、Token 或完整 Base URL。
 
-#### Scenario: 筛选在预览后发生变化
-- **WHEN** 管理员预览后修改任意筛选条件
-- **THEN** 旧 filter_hash MUST 失效
-- **THEN** 旧 confirmation_token MUST 同时失效
-- **THEN** 页面 MUST 要求重新预览
+#### Scenario: 配置更新
+- **WHEN** 管理员保存配置
+- **THEN** 审计 MUST 能说明模型数、聚合和处置开关
+- **THEN** 审计 JSON MUST 不包含任何敏感正文或收件地址
 
-### Requirement: 管理 API 操作必须纳入现有管理员审计
-所有配置写入、节点探测和事件删除 SHALL 复用现有管理员鉴权与管理操作审计。审计详情 MUST 使用脱敏摘要，禁止记录 API Key、完整提示词或完整请求载荷。
+### Requirement: 页面必须满足响应式、可访问和双语要求
+新增组件、输入、radio、switch、按钮、表格和 Dialog SHALL 有可访问名称，并使用对称 zh/en i18n。窄屏必须可重排或滚动而不遮挡保存和事件操作。
 
-#### Scenario: 配置更新成功
-- **WHEN** 管理员成功保存提示词审计配置
-- **THEN** 管理操作审计 MUST 记录操作者、request ID、enabled、blocking_enabled、config_version、节点数量、分类数量和分组范围摘要
-
-#### Scenario: 节点探测失败
-- **WHEN** 管理员探测节点失败
-- **THEN** 管理操作审计 MUST 记录节点 ID、稳定错误码、HTTP 状态和耗时
-- **THEN** 审计详情 MUST 不包含 API Key 或完整 Base URL query
-
-### Requirement: 页面必须满足响应式、可访问和国际化要求
-页面 SHALL 使用现有 Vue 3、i18n 和通用组件体系，支持桌面与窄屏，所有开关、输入、按钮、状态和对话框 MUST 具有可访问名称；新增中英文文案键 MUST 成对提供且通过现有 lint、typecheck 和 Vitest。
-
-#### Scenario: 窄屏使用
-- **WHEN** 页面宽度小于桌面断点
-- **THEN** 配置区、筛选区、表格和固定保存栏 MUST 可滚动或重排而不遮挡关键操作
-
-#### Scenario: 键盘和读屏操作
-- **WHEN** 用户只使用键盘或读屏访问页面
-- **THEN** 审计池操作、模式开关、筛选、详情和确认对话框 MUST 可识别且可操作
+#### Scenario: 国际化结构校验
+- **WHEN** 运行 locale 对称测试
+- **THEN** promptAudit 的 zh/en 顶层与新增操作键 MUST 对称

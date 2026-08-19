@@ -26,17 +26,18 @@ export async function updateConfig(payload: PromptAuditUpdateRequest): Promise<P
   return data
 }
 
-export async function probeEndpoint(endpoint: PromptAuditEndpointDraft): Promise<PromptProbeResult> {
+export async function probeEndpoint(endpoint: PromptAuditEndpointDraft, auditPrompt: string): Promise<PromptProbeResult> {
   const { data } = await apiClient.post<PromptProbeResult>(`${basePath}/endpoints/probe`, {
+    audit_prompt: auditPrompt,
     endpoint: {
       id: endpoint.id,
       name: endpoint.name,
+      adapter: endpoint.adapter,
       protocol: 'openai_compatible',
       base_url: endpoint.base_url,
       model: endpoint.model,
       token: endpoint.token || undefined,
       timeout_ms: endpoint.timeout_ms,
-      input_limit: endpoint.input_limit,
       enabled: endpoint.enabled,
     },
   })

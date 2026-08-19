@@ -30,8 +30,8 @@ func TestRedisPayloadStoreRoundTripTTLNamespaceAndDelete(t *testing.T) {
 	require.Equal(t, canary, value)
 	ttl, err := client.TTL(ctx, payloadKey(jobID)).Result()
 	require.NoError(t, err)
-	require.Greater(t, ttl, time.Duration(0))
-	require.LessOrEqual(t, ttl, DefaultPayloadTTL)
+	require.Greater(t, ttl, 2*DefaultPayloadTTL-time.Minute)
+	require.LessOrEqual(t, ttl, 2*DefaultPayloadTTL)
 	require.NoError(t, store.Delete(ctx, jobID))
 	_, err = store.Get(ctx, jobID)
 	require.ErrorIs(t, err, redis.Nil)
@@ -61,6 +61,8 @@ func TestPromptRuntimeAggregatesConfigWorkersQueueRedisEndpointsAndGuardMetrics(
 		NewRedisPayloadStore(client),
 		NewOpenAICompatibleScanner(),
 		metrics,
+		nil,
+		nil,
 	)
 	service.probes["guard-1"] = ProbeResult{OK: true, Status: "healthy", HTTPStatus: 200}
 

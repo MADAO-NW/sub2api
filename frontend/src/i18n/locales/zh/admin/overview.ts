@@ -548,7 +548,7 @@ export default {
       userCreated: '用户创建成功',
       userUpdated: '用户更新成功',
       userDeleted: '用户删除成功',
-      userEnabled: '用户已启用',
+      userEnabled: '用户已启用，提示词审计自动停用累计已重置',
       userDisabled: '用户已禁用',
       failedToLoad: '加载用户列表失败',
       failedToCreate: '创建用户失败',
