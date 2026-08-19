@@ -213,10 +213,8 @@ func TestGuardEvaluatorFlagIndependentTimeoutFailClosedAndContextCancel(t *testi
 		scanner := PromptScannerFunc(func(ctx context.Context, endpoint ActiveEndpoint, _ string, _ []string) (*NormalizedResult, error) {
 			calls++
 			if endpoint.ID == "first" {
-				select {
-				case <-ctx.Done():
-					return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Timeout: true, Cause: ctx.Err()}
-				}
+				<-ctx.Done()
+				return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Timeout: true, Cause: ctx.Err()}
 			}
 			select {
 			case <-time.After(60 * time.Millisecond):
