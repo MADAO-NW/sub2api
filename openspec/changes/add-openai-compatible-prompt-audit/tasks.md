@@ -46,6 +46,7 @@
 - [x] 4.8 实现 Redis `sub2api:prompt_guard:config:invalidate` publish/subscribe 和 publish 失败降级日志
 - [x] 4.9 添加配置加密往返、旧字段缺失、非法组合、边界值、两管理员/两实例并发 CAS、多实例失效和 Redis 不可用测试
 - [x] 4.10 添加 canary secret 测试，断言 settings 公共读取、日志和错误均不出现节点 API Key
+- [x] 4.11 取消 timeout_ms 固定业务上限，保留 100ms 最小值并增加 time.Duration 技术范围和累计预算溢出保护
 
 ## 5. 实现安全出站 Client 和节点探测
 
@@ -75,7 +76,7 @@
 ## 7. 实现 Qwen3Guard 严格解析和结果聚合
 
 - [x] 7.1 定义九类 Qwen3Guard 官方输入类别和目标项目展示标签
-- [x] 7.2 构建 OpenAI Chat Completions 请求，固定 role=user、temperature=0、max_tokens=64、seed=42
+- [x] 7.2 构建 OpenAI Chat Completions 请求，固定 role=user、temperature=0、seed=42，不发送输出 Token 上限
 - [x] 7.3 实现 choices/message/content 提取，兼容目标审计节点允许的最小合法响应形态
 - [x] 7.4 实现严格单 Safety 行、单 Categories 行、无额外非空说明解析
 - [x] 7.5 实现类别别名归一、未知类别保留和启用类别过滤
@@ -85,6 +86,7 @@
 - [x] 7.9 确保只有全部必要分片成功才能 Allow，部分成功不得产生 Safe
 - [x] 7.10 添加模型合法输出、重复字段、额外说明、未知 Safety、未知类别、禁用类别和多分片聚合测试
 - [x] 7.11 从分类、策略和脱敏 evidence 确定性生成 IssueSummary，覆盖标题/说明/严重度/动作/score/位置/Hash，且不新增重复数据库事实列
+- [x] 7.12 对名称、分隔符和唯一性合法的类别集合做服务端固定顺序规范化，乱序不再触发模型 format_repair
 
 ## 8. 实现异步投递和 Worker
 
@@ -101,6 +103,7 @@
 - [x] 8.11 添加队列满、Redis SET 失败、发布失败、进程中断、重复领取、租约刷新、滞留回收、旧 Worker claim_version 失效和重试集成测试
 - [x] 8.12 证明异步模式所有失败都不改变模型请求状态、错误体和上游转发次数
 - [x] 8.13 为逐分片开始/完成/失败和聚合输出稳定日志，字段只含索引、字符数、限制、节点、动作、耗时和错误码
+- [x] 8.14 为长时间单模型调用增加 30 秒 processing 租约心跳，刷新失败取消调用并交由 reclaimer 安全接管
 
 ## 9. 实现同步 Guard evaluator
 

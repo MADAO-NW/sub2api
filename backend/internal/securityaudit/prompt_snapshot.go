@@ -71,8 +71,7 @@ func extractPromptSnapshot(req Request, latestTurnOnly bool) (PromptSnapshot, er
 	}, nil
 }
 
-// DefaultPromptPreviewMaxRunes caps how much sanitized prompt text may be
-// considered before BuildPromptPreview withholds the majority for storage/UI.
+// DefaultPromptPreviewMaxRunes 限制任务表和管理端展示的脱敏提示词预览长度。
 const DefaultPromptPreviewMaxRunes = 96
 
 // DefaultFullPromptMaxRunes caps how much unredacted prompt text is persisted
@@ -574,45 +573,12 @@ func RedactPreview(value string, maxRunes int) string {
 	return TrimRunes(value, maxRunes)
 }
 
-// BuildPromptPreview stores only a short, non-recoverable head of sanitized
-// input. Ordinary confidential prompts must not land nearly intact in PostgreSQL
-// or the admin UI merely because no secret regex matched.
+// BuildPromptPreview 保留短预览用于管理员快速复核，并掩码凭据、邮箱、手机号等敏感值。
 func BuildPromptPreview(value string, maxRunes int) string {
 	if maxRunes <= 0 {
 		maxRunes = DefaultPromptPreviewMaxRunes
 	}
-	redacted := strings.TrimSpace(RedactPreview(value, maxRunes))
-	if redacted == "" {
-		return ""
-	}
-	runes := []rune(redacted)
-	hadTruncation := strings.HasSuffix(redacted, "…")
-	if hadTruncation && len(runes) > 0 {
-		runes = runes[:len(runes)-1]
-	}
-	if len(runes) == 0 {
-		return "***…"
-	}
-	// Short unlabelled secrets would otherwise leak a recoverable prefix (e.g.
-	// 20 runes → 5 visible). Fully withhold anything below the keep threshold.
-	const minLengthForPartialPreview = 32
-	if len(runes) < minLengthForPartialPreview {
-		if hadTruncation {
-			return "***…"
-		}
-		return "***"
-	}
-	// Keep at most a quarter of the already-truncated text, and never more than
-	// 24 runes, so the majority of prompt content is withheld by default.
-	keep := len(runes) / 4
-	if keep > 24 {
-		keep = 24
-	}
-	preview := string(runes[:keep]) + "***"
-	if hadTruncation || keep < len(runes) {
-		preview += "…"
-	}
-	return preview
+	return strings.TrimSpace(RedactPreview(value, maxRunes))
 }
 
 // BuildFullPrompt returns the complete prompt text for audit-event storage and

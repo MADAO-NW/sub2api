@@ -59,6 +59,7 @@ type Event struct {
 	ConfigVersion   int64              `json:"config_version"`
 	ChunkTotal      int                `json:"chunk_total"`
 	LatencyMS       int                `json:"latency_ms"`
+	ModelResults    ModelResults       `json:"model_results"`
 	IssueSummaries  []IssueSummary     `json:"issue_summaries"`
 	CreatedAt       time.Time          `json:"created_at"`
 }
@@ -69,12 +70,14 @@ type JobRepository interface {
 	MarkStagingFailed(ctx context.Context, jobID int64, code, message string) error
 	ClaimNextJob(ctx context.Context, now time.Time) (*Job, bool, error)
 	RefreshLease(ctx context.Context, jobID, claimVersion int64, now time.Time) error
-	Complete(ctx context.Context, job *Job, result *NormalizedResult, storePassEvents bool) (*Event, error)
-	Retry(ctx context.Context, jobID, claimVersion int64, next time.Time, code, message string) error
-	Fail(ctx context.Context, jobID, claimVersion int64, code, message string) error
+	Complete(ctx context.Context, job *Job, result *NormalizedResult, cfg ActiveConfig) (*CompletionResult, error)
+	Retry(ctx context.Context, jobID, claimVersion int64, jobAttempt int, next time.Time, code, message string, attempts []ModelCallAttempt) error
+	Fail(ctx context.Context, jobID, claimVersion int64, jobAttempt int, code, message string, attempts []ModelCallAttempt) error
 	ReclaimStale(ctx context.Context, stagingBefore, processingBefore time.Time, limit int) (int64, error)
+	PurgeExpiredModelAttemptBodies(ctx context.Context, cutoff time.Time, limit int) (int64, error)
 	QueueStats(ctx context.Context) (QueueStats, error)
-	RecordBlocking(ctx context.Context, snapshot PromptSnapshot, configVersion int64, result *NormalizedResult, storePassEvents bool) (*Event, error)
+	RecordBlocking(ctx context.Context, snapshot PromptSnapshot, cfg ActiveConfig, result *NormalizedResult) (*CompletionResult, error)
+	RecordBlockingFailure(ctx context.Context, snapshot PromptSnapshot, cfg ActiveConfig, code string, attempts []ModelCallAttempt) error
 }
 
 type PostgreSQLRepository struct {
@@ -169,10 +172,11 @@ func (r *PostgreSQLRepository) RefreshLease(ctx context.Context, jobID, claimVer
 	return requireOneRow(result, err, ErrLeaseLost)
 }
 
-func (r *PostgreSQLRepository) Complete(ctx context.Context, job *Job, result *NormalizedResult, storePassEvents bool) (*Event, error) {
+func (r *PostgreSQLRepository) Complete(ctx context.Context, job *Job, result *NormalizedResult, cfg ActiveConfig) (*CompletionResult, error) {
 	if job == nil || result == nil {
 		return nil, errors.New("prompt audit completion requires job and result")
 	}
+	prepareResultForCompletion(result, cfg)
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -185,37 +189,83 @@ func (r *PostgreSQLRepository) Complete(ctx context.Context, job *Job, result *N
 	if err := requireOneRow(updateResult, err, ErrLeaseLost); err != nil {
 		return nil, err
 	}
+	if err := insertModelAttempts(ctx, tx, job.ID, jobAttemptNumber(job.Attempts), result.ModelResults.FailedAttempts); err != nil {
+		return nil, err
+	}
 	var event *Event
-	if shouldStorePromptAuditEvent(result.Decision, storePassEvents) {
-		event, err = insertEvent(ctx, tx, job.ID, job.Snapshot.Redacted(), job.ConfigVersion, result)
+	if shouldStorePromptAuditEvent(result.Decision, cfg.StorePassEvents) {
+		event, err = insertEvent(ctx, tx, job.ID, job.Snapshot.Redacted(), result.ModelResults.Aggregation.ConfigVersion, result)
 		if err != nil {
 			return nil, err
 		}
 	}
+	outcome, err := insertOutcome(ctx, tx, job, event, result)
+	if err != nil {
+		return nil, err
+	}
+	disabledUserID, err := applyOutcomeEnforcement(ctx, tx, outcome, cfg)
+	if err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return event, nil
+	return &CompletionResult{Event: event, Outcome: outcome, DisabledUserID: disabledUserID}, nil
 }
 
-func (r *PostgreSQLRepository) Retry(ctx context.Context, jobID, claimVersion int64, next time.Time, code, _ string) error {
+func (r *PostgreSQLRepository) Retry(
+	ctx context.Context,
+	jobID, claimVersion int64,
+	jobAttempt int,
+	next time.Time,
+	code, _ string,
+	attempts []ModelCallAttempt,
+) error {
 	code, message := sanitizeStoredError(code)
-	result, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 		UPDATE prompt_audit_jobs SET status='retry', next_attempt_at=$3, processing_started_at=NULL,
 			updated_at=NOW(), last_error_code=$4, last_error_message=$5
 		WHERE id=$1 AND status='processing' AND claim_version=$2`,
 		jobID, claimVersion, next.UTC(), code, message)
-	return requireOneRow(result, err, ErrLeaseLost)
+	if err := requireOneRow(result, err, ErrLeaseLost); err != nil {
+		return err
+	}
+	if err := insertModelAttempts(ctx, tx, jobID, jobAttemptNumber(jobAttempt), attempts); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (r *PostgreSQLRepository) Fail(ctx context.Context, jobID, claimVersion int64, code, _ string) error {
+func (r *PostgreSQLRepository) Fail(
+	ctx context.Context,
+	jobID, claimVersion int64,
+	jobAttempt int,
+	code, _ string,
+	attempts []ModelCallAttempt,
+) error {
 	code, message := sanitizeStoredError(code)
-	result, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 		UPDATE prompt_audit_jobs SET status='failed', processed_at=NOW(), processing_started_at=NULL,
 			updated_at=NOW(), last_error_code=$3, last_error_message=$4
 		WHERE id=$1 AND status='processing' AND claim_version=$2`,
 		jobID, claimVersion, code, message)
-	return requireOneRow(result, err, ErrLeaseLost)
+	if err := requireOneRow(result, err, ErrLeaseLost); err != nil {
+		return err
+	}
+	if err := insertModelAttempts(ctx, tx, jobID, jobAttemptNumber(jobAttempt), attempts); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *PostgreSQLRepository) ReclaimStale(ctx context.Context, stagingBefore, processingBefore time.Time, limit int) (int64, error) {
@@ -240,6 +290,27 @@ func (r *PostgreSQLRepository) ReclaimStale(ctx context.Context, stagingBefore, 
 			last_error_code=CASE WHEN j.status='staging' THEN 'staging_timeout' ELSE 'processing_lease_expired' END,
 			last_error_message='', updated_at=NOW()
 		FROM stale WHERE j.id=stale.id`, stagingBefore.UTC(), processingBefore.UTC(), limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (r *PostgreSQLRepository) PurgeExpiredModelAttemptBodies(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 1000
+	}
+	result, err := r.db.ExecContext(ctx, `
+		WITH expired AS (
+			SELECT id FROM prompt_audit_model_attempts
+			WHERE response_body <> '' AND created_at < $1
+			ORDER BY created_at, id
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		)
+		UPDATE prompt_audit_model_attempts AS a
+		SET response_body='', response_purged_at=NOW()
+		FROM expired WHERE a.id=expired.id`, cutoff.UTC(), limit)
 	if err != nil {
 		return 0, err
 	}
@@ -278,30 +349,104 @@ func (r *PostgreSQLRepository) QueueStats(ctx context.Context) (QueueStats, erro
 	return stats, rows.Err()
 }
 
-func (r *PostgreSQLRepository) RecordBlocking(ctx context.Context, snapshot PromptSnapshot, configVersion int64, result *NormalizedResult, storePassEvents bool) (*Event, error) {
+func (r *PostgreSQLRepository) RecordBlocking(ctx context.Context, snapshot PromptSnapshot, cfg ActiveConfig, result *NormalizedResult) (*CompletionResult, error) {
 	if result == nil {
 		return nil, errors.New("prompt guard result required")
 	}
+	prepareResultForCompletion(result, cfg)
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	job, err := insertJob(ctx, tx, snapshot.Redacted(), ModeBlocking, configVersion, "done", 1)
+	job, err := insertJob(ctx, tx, snapshot.Redacted(), ModeBlocking, cfg.ConfigVersion, "done", 1)
 	if err != nil {
 		return nil, err
 	}
+	if err := insertModelAttempts(ctx, tx, job.ID, 1, result.ModelResults.FailedAttempts); err != nil {
+		return nil, err
+	}
 	var event *Event
-	if shouldStorePromptAuditEvent(result.Decision, storePassEvents) {
-		event, err = insertEvent(ctx, tx, job.ID, snapshot.Redacted(), configVersion, result)
+	if shouldStorePromptAuditEvent(result.Decision, cfg.StorePassEvents) {
+		event, err = insertEvent(ctx, tx, job.ID, snapshot.Redacted(), cfg.ConfigVersion, result)
 		if err != nil {
 			return nil, err
 		}
 	}
+	outcome, err := insertOutcome(ctx, tx, job, event, result)
+	if err != nil {
+		return nil, err
+	}
+	disabledUserID, err := applyOutcomeEnforcement(ctx, tx, outcome, cfg)
+	if err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return event, nil
+	return &CompletionResult{Event: event, Outcome: outcome, DisabledUserID: disabledUserID}, nil
+}
+
+func (r *PostgreSQLRepository) RecordBlockingFailure(
+	ctx context.Context,
+	snapshot PromptSnapshot,
+	cfg ActiveConfig,
+	code string,
+	attempts []ModelCallAttempt,
+) error {
+	code, message := sanitizeStoredError(code)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	job, err := insertJob(ctx, tx, snapshot.Redacted(), ModeBlocking, cfg.ConfigVersion, "failed", 1)
+	if err != nil {
+		return err
+	}
+	updateResult, err := tx.ExecContext(ctx, `
+		UPDATE prompt_audit_jobs
+		SET attempts=1, last_error_code=$2, last_error_message=$3, updated_at=NOW()
+		WHERE id=$1 AND status='failed'`, job.ID, code, message)
+	if err := requireOneRow(updateResult, err, ErrLeaseLost); err != nil {
+		return err
+	}
+	if err := insertModelAttempts(ctx, tx, job.ID, 1, attempts); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func prepareResultForCompletion(result *NormalizedResult, cfg ActiveConfig) {
+	if result == nil {
+		return
+	}
+	aggregation := &result.ModelResults.Aggregation
+	aggregation.ConfigVersion = cfg.ConfigVersion
+	if aggregation.Strategy == "" {
+		aggregation.Strategy = cfg.AggregationStrategy
+	}
+	if aggregation.Strategy == "" {
+		aggregation.Strategy = AggregationAnyBlock
+	}
+	if aggregation.EnabledModelCount < 1 {
+		aggregation.EnabledModelCount = len(cfg.EnabledEndpoints())
+	}
+	if aggregation.EnabledModelCount < 1 {
+		aggregation.EnabledModelCount = 1
+	}
+	if aggregation.BlockThreshold < 1 {
+		aggregation.BlockThreshold = CalculateBlockThreshold(aggregation.Strategy, aggregation.EnabledModelCount)
+	}
+	if aggregation.PromptContractVersion == "" {
+		aggregation.PromptContractVersion = PromptContractVersion
+	}
+	if aggregation.AuditPromptHash == "" {
+		aggregation.AuditPromptHash = promptAuditHash(cfg.AuditPrompt)
+	}
+	if result.ModelResults.Models == nil {
+		result.ModelResults.Models = []ModelAuditResult{}
+	}
 }
 
 // shouldStorePromptAuditEvent keeps store_pass_events scoped to safe results.
@@ -314,6 +459,10 @@ type sqlQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func insertJob(ctx context.Context, queryer sqlQueryer, snapshot PromptSnapshot, mode Mode, configVersion int64, status string, maxAttempts int) (*Job, error) {
 	processedExpr := "NULL"
 	if status == "done" || status == "failed" {
@@ -324,7 +473,12 @@ func insertJob(ctx context.Context, queryer sqlQueryer, snapshot PromptSnapshot,
 			request_id,user_id,username_snapshot,user_email_snapshot,api_key_id,api_key_name_snapshot,
 			group_id,group_name,provider,endpoint,protocol,model,prompt_hash,redacted_preview,
 			prompt_length,message_count,stage,execution_mode,config_version,status,max_attempts,processed_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,`+processedExpr+`)
+		) VALUES (
+			$1,(SELECT id FROM users WHERE id=$2),$3,$4,
+			(SELECT id FROM api_keys WHERE id=$5),$6,
+			(SELECT id FROM groups WHERE id=$7),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+			`+processedExpr+`
+		)
 		RETURNING `+jobColumns("prompt_audit_jobs"),
 		snapshot.RequestID, nullableID(snapshot.UserID), snapshot.UsernameSnapshot, snapshot.UserEmailSnapshot,
 		nullableID(snapshot.APIKeyID), snapshot.APIKeyNameSnapshot, snapshot.GroupID, snapshot.GroupName,
@@ -343,15 +497,23 @@ func insertEvent(ctx context.Context, queryer sqlQueryer, jobID int64, snapshot 
 		evidence[key] = RedactPreview(value, 160)
 	}
 	evidenceJSON, _ := json.Marshal(evidence)
+	modelResults, err := json.Marshal(result.ModelResults)
+	if err != nil {
+		return nil, err
+	}
 	row := queryer.QueryRowContext(ctx, `
 		INSERT INTO prompt_audit_events (
 			job_id,request_id,user_id,username_snapshot,user_email_snapshot,api_key_id,api_key_name_snapshot,
 			group_id,group_name,provider,endpoint,protocol,model,prompt_hash,redacted_preview,stage,
 			decision,risk_level,action,categories,matched_scanners,scanner_scores,scanner_evidence,
 			scanner_backend,scanner_version,guard_endpoint_id,policy_id,policy_version,config_version,chunk_total,latency_ms,
-			full_prompt
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-			$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+			full_prompt,model_results
+		) VALUES (
+			$1,$2,(SELECT id FROM users WHERE id=$3),$4,$5,
+			(SELECT id FROM api_keys WHERE id=$6),$7,
+			(SELECT id FROM groups WHERE id=$8),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+			$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33::jsonb
+		)
 		RETURNING `+eventDetailColumns("prompt_audit_events"),
 		jobID, snapshot.RequestID, nullableID(snapshot.UserID), snapshot.UsernameSnapshot, snapshot.UserEmailSnapshot,
 		nullableID(snapshot.APIKeyID), snapshot.APIKeyNameSnapshot, snapshot.GroupID, snapshot.GroupName,
@@ -359,8 +521,50 @@ func insertEvent(ctx context.Context, queryer sqlQueryer, jobID int64, snapshot 
 		snapshot.RedactedPreview, normalizeStage(snapshot.Stage), string(result.Decision), string(result.RiskLevel),
 		string(result.Action), categories, matched, scores, evidenceJSON, result.ScannerBackend, result.ScannerVersion,
 		result.GuardEndpointID, result.PolicyID, result.PolicyVersion, configVersion, result.ChunkTotal, result.LatencyMS,
-		snapshot.FullPrompt)
+		snapshot.FullPrompt, modelResults)
 	return scanEvent(row, true)
+}
+
+func insertModelAttempts(
+	ctx context.Context,
+	execer sqlExecer,
+	jobID int64,
+	jobAttempt int,
+	attempts []ModelCallAttempt,
+) error {
+	if len(attempts) == 0 {
+		return nil
+	}
+	if jobAttempt < 1 {
+		jobAttempt = 1
+	}
+	for _, attempt := range attempts {
+		if attempt.ModelSequence < 1 || attempt.CallAttempt < 1 {
+			return errors.New("prompt audit model attempt identity invalid")
+		}
+		if attempt.AttemptKind != "initial" && attempt.AttemptKind != "format_repair" && attempt.AttemptKind != "protocol_retry" {
+			return errors.New("prompt audit model attempt kind invalid")
+		}
+		_, err := execer.ExecContext(ctx, `
+			INSERT INTO prompt_audit_model_attempts (
+				job_id,job_attempt,model_sequence,call_attempt,attempt_kind,
+				guard_endpoint_id,adapter,model,http_status,latency_ms,
+				input_tokens,output_tokens,reasoning_tokens,error_code,retryable,
+				response_body,response_sha256,response_bytes,response_truncated
+			) VALUES (
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+			)
+			ON CONFLICT (job_id,job_attempt,model_sequence,call_attempt) DO NOTHING`,
+			jobID, jobAttempt, attempt.ModelSequence, attempt.CallAttempt, attempt.AttemptKind,
+			attempt.EndpointID, attempt.Adapter, attempt.Model, attempt.HTTPStatus, attempt.LatencyMS,
+			nullableInt(attempt.InputTokens), nullableInt(attempt.OutputTokens), nullableInt(attempt.ReasoningTokens),
+			stableErrorCode(attempt.ErrorCode), attempt.Retryable, attempt.ResponseBody, attempt.ResponseSHA256,
+			attempt.ResponseBytes, attempt.ResponseTruncated)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -432,6 +636,20 @@ func nullableID(value int64) any {
 		return nil
 	}
 	return value
+}
+
+func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func jobAttemptNumber(attempt int) int {
+	if attempt < 1 {
+		return 1
+	}
+	return attempt
 }
 
 func nullableInt64Value(value sql.NullInt64) int64 {

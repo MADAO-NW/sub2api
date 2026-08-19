@@ -2,6 +2,7 @@ package securityaudit
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,25 +15,43 @@ func TestParseQwen3GuardStrictAndPolicy(t *testing.T) {
 		enabled      []string
 		decision     EventDecision
 		action       Action
-		wantErr      bool
+		errorDetail  string
 	}{
-		{"safe", "Safety: Safe\nCategories: None", AllScannerIDs, EventPass, ActionAllow, false},
-		{"controversial", "Safety: Controversial\nCategories: Violent", AllScannerIDs, EventFlag, ActionWarn, false},
-		{"controversial pii escalates", "Safety: Controversial\nCategories: PII", AllScannerIDs, EventCritical, ActionBlock, false},
-		{"unsafe", "Safety: Unsafe\nCategories: Jailbreak", AllScannerIDs, EventCritical, ActionBlock, false},
-		{"unknown unsafe", "Safety: Unsafe\nCategories: Future Risk", AllScannerIDs, EventCritical, ActionBlock, false},
-		{"disabled unsafe warns", "Safety: Unsafe\nCategories: Violent", []string{"PII"}, EventFlag, ActionWarn, false},
-		{"extra explanation", "Safety: Safe\nCategories: None\nThis is safe", AllScannerIDs, EventPass, ActionAllow, false},
-		{"duplicate", "Safety: Safe\nSafety: Safe", AllScannerIDs, "", "", true},
-		{"duplicate categories", "Safety: Safe\nCategories: None\nCategories: PII", AllScannerIDs, "", "", true},
-		{"missing categories", "Safety: Safe\n", AllScannerIDs, "", "", true},
-		{"unknown safety", "Safety: Maybe\nCategories: PII", AllScannerIDs, "", "", true},
+		{"safe", "Safety: Safe\nCategories: None", AllScannerIDs, EventPass, ActionAllow, ""},
+		{"single trailing newline", "Safety: Safe\r\nCategories: None\r\n", AllScannerIDs, EventPass, ActionAllow, ""},
+		{"controversial", "Safety: Controversial\nCategories: Violent", AllScannerIDs, EventFlag, ActionWarn, ""},
+		{"controversial pii escalates", "Safety: Controversial\nCategories: PII", AllScannerIDs, EventCritical, ActionBlock, ""},
+		{"unsafe", "Safety: Unsafe\nCategories: Jailbreak", AllScannerIDs, EventCritical, ActionBlock, ""},
+		{"disabled unsafe warns", "Safety: Unsafe\nCategories: Violent", []string{"PII"}, EventFlag, ActionWarn, ""},
+		{"unknown unsafe", "Safety: Unsafe\nCategories: Future Risk", AllScannerIDs, "", "", "invalid_categories"},
+		{"extra explanation", "Safety: Safe\nCategories: None\nThis is safe", AllScannerIDs, "", "", "invalid_line_count"},
+		{"extra trailing newline", "Safety: Safe\nCategories: None\n\n", AllScannerIDs, "", "", "invalid_line_count"},
+		{"duplicate", "Safety: Safe\nSafety: Safe", AllScannerIDs, "", "", "invalid_categories"},
+		{"duplicate categories", "Safety: Safe\nCategories: None\nCategories: PII", AllScannerIDs, "", "", "invalid_line_count"},
+		{"missing categories", "Safety: Safe\n", AllScannerIDs, "", "", "invalid_line_count"},
+		{"unknown safety", "Safety: Maybe\nCategories: PII", AllScannerIDs, "", "", "invalid_safety"},
+		{"wrong case", "safety: Safe\nCategories: None", AllScannerIDs, "", "", "invalid_safety"},
+		{"leading space", " Safety: Safe\nCategories: None", AllScannerIDs, "", "", "invalid_safety"},
+		{"trailing space", "Safety: Safe \nCategories: None", AllScannerIDs, "", "", "invalid_safety"},
+		{"wrong field order", "Categories: None\nSafety: Safe", AllScannerIDs, "", "", "invalid_safety"},
+		{"wrong category case", "Safety: Unsafe\nCategories: pii", AllScannerIDs, "", "", "invalid_categories"},
+		{"wrong separator", "Safety: Unsafe\nCategories: Violent,Jailbreak", AllScannerIDs, "", "", "invalid_categories"},
+		{"out-of-order categories", "Safety: Unsafe\nCategories: Copyright Violation, Unethical Acts", AllScannerIDs, EventCritical, ActionBlock, ""},
+		{"duplicate category", "Safety: Unsafe\nCategories: PII, PII", AllScannerIDs, "", "", "invalid_category_order"},
+		{"safe with category", "Safety: Safe\nCategories: PII", AllScannerIDs, "", "", "invalid_safety_category_pair"},
+		{"controversial none", "Safety: Controversial\nCategories: None", AllScannerIDs, "", "", "invalid_safety_category_pair"},
+		{"unsafe none", "Safety: Unsafe\nCategories: None", AllScannerIDs, "", "", "invalid_safety_category_pair"},
+		{"json", `{"Safety":"Safe","Categories":"None"}`, AllScannerIDs, "", "", "unexpected_output_wrapper"},
+		{"markdown", "```\nSafety: Safe\nCategories: None\n```", AllScannerIDs, "", "", "unexpected_output_wrapper"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := ParseQwen3Guard(tt.output, tt.enabled)
-			if tt.wantErr {
-				require.Error(t, err)
+			if tt.errorDetail != "" {
+				var guardErr *GuardError
+				require.ErrorAs(t, err, &guardErr)
+				require.Equal(t, ErrorCodeInvalidResponse, guardErr.Code)
+				require.Equal(t, tt.errorDetail, guardErr.DetailCode)
 				return
 			}
 			require.NoError(t, err)
@@ -42,25 +61,33 @@ func TestParseQwen3GuardStrictAndPolicy(t *testing.T) {
 	}
 }
 
-func TestParseQwen3GuardIgnoresAuxiliaryResponseFields(t *testing.T) {
-	result, err := ParseQwen3Guard("Safety: Unsafe\nCategories: Jailbreak\nRefusal: No", AllScannerIDs)
+func TestParseQwen3GuardCanonicalizesCategoryOrder(t *testing.T) {
+	result, err := ParseQwen3Guard(
+		"Safety: Unsafe\nCategories: Copyright Violation, Unethical Acts",
+		AllScannerIDs,
+	)
 	require.NoError(t, err)
-	require.Equal(t, "Unsafe", result.Safety)
-	require.Equal(t, []string{"jailbreak"}, result.Categories)
-
-	serialized, err := json.Marshal(result)
-	require.NoError(t, err)
-	require.NotContains(t, string(serialized), "Refusal")
-	require.NotContains(t, string(serialized), "No")
+	require.Equal(t, []string{"unethical_acts", "copyright_violation"}, result.Categories)
+	require.Equal(t, []string{"unethical_acts", "copyright_violation"}, result.MatchedScanners)
+	require.Equal(t, EventCritical, result.Decision)
+	require.Equal(t, ActionBlock, result.Action)
 }
 
-func TestQwen3GuardOfficialCategoriesAliasesAndUnknownAreStable(t *testing.T) {
+func TestParseQwen3GuardRejectsAuxiliaryResponseFields(t *testing.T) {
+	_, err := ParseQwen3Guard("Safety: Unsafe\nCategories: Jailbreak\nRefusal: No", AllScannerIDs)
+	var guardErr *GuardError
+	require.ErrorAs(t, err, &guardErr)
+	require.Equal(t, "invalid_line_count", guardErr.DetailCode)
+}
+
+func TestQwen3GuardOfficialCategoriesAndNormalizationAreStable(t *testing.T) {
 	official := "Violent, Non-violent Illegal Acts, Sexual Content or Sexual Acts, PII, Suicide & Self-Harm, Unethical Acts, Politically Sensitive Topics, Copyright Violation, Jailbreak"
+	require.Equal(t, strings.Split(official, ", "), qwenCategoryLabels)
 	result, err := ParseQwen3Guard("Safety: Unsafe\nCategories: "+official, AllScannerIDs)
 	require.NoError(t, err)
 	require.Equal(t, AllScannerIDs, result.MatchedScanners)
 	require.Empty(t, result.UnknownCategories)
-	require.Equal(t, "priority", result.PolicyID)
+	require.Equal(t, StrategyOrderedAll, result.PolicyID)
 	require.Equal(t, 1, result.PolicyVersion)
 
 	aliases := map[string]string{
@@ -75,12 +102,10 @@ func TestQwen3GuardOfficialCategoriesAliasesAndUnknownAreStable(t *testing.T) {
 	}
 
 	const canary = "PROMPT_CANARY_RAW_UNKNOWN_CATEGORY"
-	unknown, err := ParseQwen3Guard("Safety: Unsafe\nCategories: "+canary, AllScannerIDs)
-	require.NoError(t, err)
-	require.Len(t, unknown.UnknownCategories, 1)
-	require.NotContains(t, unknown.UnknownCategories[0], "canary")
-	require.NotContains(t, unknown.UnknownCategories[0], "raw")
-	require.Contains(t, unknown.UnknownCategories[0], "unknown:")
+	_, err = ParseQwen3Guard("Safety: Unsafe\nCategories: "+canary, AllScannerIDs)
+	var guardErr *GuardError
+	require.ErrorAs(t, err, &guardErr)
+	require.Equal(t, "invalid_categories", guardErr.DetailCode)
 }
 
 func TestExtractOpenAIContentSupportsStringAndTextBlocks(t *testing.T) {
@@ -96,31 +121,39 @@ func TestExtractOpenAIContentSupportsStringAndTextBlocks(t *testing.T) {
 	}
 }
 
-func TestAggregateRequiresEveryResult(t *testing.T) {
-	_, err := AggregateResults([]*NormalizedResult{{Decision: EventPass, Action: ActionAllow}, nil}, 0)
-	require.Error(t, err)
-	result, err := AggregateResults([]*NormalizedResult{
+func TestAggregateModelResultsHonorsFrozenThreshold(t *testing.T) {
+	for modelCount := 1; modelCount <= 4; modelCount++ {
+		require.Equal(t, 1, CalculateBlockThreshold(AggregationAnyBlock, modelCount))
+		require.Equal(t, modelCount/2+1, CalculateBlockThreshold(AggregationMajorityBlock, modelCount))
+		require.Equal(t, modelCount, CalculateBlockThreshold(AggregationAllBlock, modelCount))
+	}
+
+	modelResults := ModelResults{Aggregation: ModelAggregation{
+		Strategy: AggregationMajorityBlock, EnabledModelCount: 2, BlockThreshold: 2,
+	}}
+	result := aggregateModelResults([]*NormalizedResult{
 		{Decision: EventPass, RiskLevel: RiskLow, Action: ActionAllow, Categories: []string{"pii"}},
 		{Decision: EventCritical, RiskLevel: RiskCritical, Action: ActionBlock, Categories: []string{"jailbreak"}},
-	}, 0)
-	require.NoError(t, err)
-	require.Equal(t, EventCritical, result.Decision)
-	require.Equal(t, ActionBlock, result.Action)
+	}, modelResults, 0)
+	require.Equal(t, EventFlag, result.Decision)
+	require.Equal(t, ActionWarn, result.Action)
 	require.Equal(t, []string{"pii", "jailbreak"}, result.Categories)
 }
 
 func TestAggregateDeduplicatesFactsAndUsesMostSevereEndpointMetadata(t *testing.T) {
-	result, err := AggregateResults([]*NormalizedResult{
-		{Decision: EventPass, RiskLevel: RiskLow, Action: ActionAllow, Safety: "Safe", Categories: []string{"pii"}, MatchedScanners: []string{"pii"}, ScannerScores: map[string]float64{"pii": 0}, ScannerEvidence: map[string]string{"pii": "first"}, GuardEndpointID: "safe-node", ScannerVersion: "safe-version", PolicyID: "priority", PolicyVersion: 1},
-		{Decision: EventCritical, RiskLevel: RiskCritical, Action: ActionBlock, Safety: "Unsafe", Categories: []string{"pii", "jailbreak"}, MatchedScanners: []string{"pii", "jailbreak"}, ScannerScores: map[string]float64{"pii": 1, "jailbreak": 1}, ScannerEvidence: map[string]string{"pii": "second", "jailbreak": "blocked"}, GuardEndpointID: "block-node", ScannerVersion: "block-version", PolicyID: "priority", PolicyVersion: 2},
-	}, 7*time.Millisecond)
-	require.NoError(t, err)
+	modelResults := ModelResults{Aggregation: ModelAggregation{
+		Strategy: AggregationAnyBlock, EnabledModelCount: 2, BlockThreshold: 1,
+	}}
+	result := aggregateModelResults([]*NormalizedResult{
+		{Decision: EventPass, RiskLevel: RiskLow, Action: ActionAllow, Safety: "Safe", Categories: []string{"pii"}, MatchedScanners: []string{"pii"}, ScannerScores: map[string]float64{"pii": 0}, ScannerEvidence: map[string]string{"pii": "first"}, GuardEndpointID: "safe-node", ScannerVersion: "safe-version", PolicyID: StrategyOrderedAll, PolicyVersion: 1},
+		{Decision: EventCritical, RiskLevel: RiskCritical, Action: ActionBlock, Safety: "Unsafe", Categories: []string{"pii", "jailbreak"}, MatchedScanners: []string{"pii", "jailbreak"}, ScannerScores: map[string]float64{"pii": 1, "jailbreak": 1}, ScannerEvidence: map[string]string{"pii": "second", "jailbreak": "blocked"}, GuardEndpointID: "block-node", ScannerVersion: "block-version", PolicyID: StrategyOrderedAll, PolicyVersion: 2},
+	}, modelResults, 7*time.Millisecond)
 	require.Equal(t, []string{"pii", "jailbreak"}, result.Categories)
 	require.Equal(t, []string{"pii", "jailbreak"}, result.MatchedScanners)
 	require.Equal(t, "first", result.ScannerEvidence["pii"], "evidence is deterministically first-seen")
 	require.Equal(t, "block-node", result.GuardEndpointID)
-	require.Equal(t, "block-version", result.ScannerVersion)
-	require.Equal(t, 2, result.PolicyVersion)
+	require.Equal(t, PromptContractVersion, result.ScannerVersion)
+	require.Equal(t, 1, result.PolicyVersion)
 	require.Equal(t, 7, result.LatencyMS)
 }
 
@@ -130,7 +163,7 @@ func TestIssueSummariesAreDeterministicRedactedDerivedDTOs(t *testing.T) {
 		Decision: EventCritical, RiskLevel: RiskCritical, Action: ActionBlock,
 		Categories: []string{"jailbreak", "pii"}, MatchedScanners: []string{"pii"},
 		ScannerScores: map[string]float64{"pii": 1}, ScannerEvidence: map[string]string{"pii": canary},
-		UnknownCategories: []string{unknownCategoryID("future risk")},
+		UnknownCategories: []string{"unknown:0123456789abcdef"},
 	}
 	summaries := BuildIssueSummaries(result)
 	require.Len(t, summaries, 3, "known categories are not hidden merely because policy disabled one")

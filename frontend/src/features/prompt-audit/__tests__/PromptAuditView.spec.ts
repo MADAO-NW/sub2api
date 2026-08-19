@@ -19,9 +19,16 @@ vi.mock('vue-i18n', async () => {
 })
 
 const baseConfig = (): PromptAuditConfig => ({
-  enabled: true, blocking_enabled: false, blocking_latest_turn_only: false, store_pass_events: false, effective_mode: 'async_audit', strategy: 'priority',
+  enabled: true, blocking_enabled: false, blocking_latest_turn_only: false, store_pass_events: false, effective_mode: 'async_audit', strategy: 'ordered_all',
+  aggregation_strategy: 'any_block', audit_prompt: 'draft audit prompt',
   worker_count: 4, queue_capacity: 100, scanners: SCANNER_CATALOG.map((item) => item.id), all_groups: true, group_ids: [],
-  endpoints: [{ id: 'guard-1', name: 'Guard One', protocol: 'openai_compatible', base_url: 'http://127.0.0.1:8000', model: 'guard-model', timeout_ms: 3000, input_limit: 4000, enabled: true, has_token: true, token_status: 'configured' }],
+  notifications: { admin_email: '' },
+  enforcement: {
+    email_warning: { enabled: false, rule_revision: 1, lookback_count: 10, violation_threshold: 3 },
+    account_disable: { enabled: false, violation_threshold: 5 },
+  },
+  endpoints: [{ id: 'guard-1', name: 'Guard One', adapter: 'qwen3guard', protocol: 'openai_compatible', base_url: 'http://127.0.0.1:8000', model: 'guard-model', timeout_ms: 3000, enabled: true, has_token: true, token_status: 'configured' }],
+  prompt_contract: { version: 'qwen-two-line-v1', fixed_output_prompt: 'fixed contract' },
   config_version: 7, updated_at: '2026-07-16T00:00:00Z', updated_by: 1, change_summary: '{}',
 })
 const runtime = (): PromptAuditRuntime => ({
@@ -29,7 +36,11 @@ const runtime = (): PromptAuditRuntime => ({
   worker_total: 4, worker_active: 1, queue_capacity: 100,
   queue: { staging: 0, queued: 0, processing: 1, retry: 0, done: 5, failed: 0, active: 1 },
   processed_total: 5, failed_total: 0, enqueued_total: 5, dropped_total: 0, database_status: 'ok', redis_status: 'ok', endpoints: {},
+  models: [], aggregation_strategy: 'any_block', enabled_model_count: 1, block_threshold: 1,
+  prompt_contract_version: 'qwen-two-line-v1', audit_prompt_hash: 'a'.repeat(64),
   guard_metrics: { total: 1, allowed: 1, flagged: 0, blocked: 0, unavailable: 0, invalid: 0, timeouts: 0, failovers: 0, bulkhead_full: 0, record_failed: 0 },
+  evaluation_metrics: { total: 1, partial_failure: 0, latency_p50_ms: 10, latency_p95_ms: 10 },
+  enforcement: { outcomes_total: 1, violations_total: 0, warnings_total: 0, disabled_total: 0, mail_failures_total: 0 },
 })
 
 const AppLayoutStub = { template: '<div><slot /></div>' }
@@ -38,7 +49,9 @@ const EndpointStub = defineComponent({
   props: ['endpoints', 'probeResults', 'probingIds'], emits: ['update:endpoints', 'probe'],
   template: '<div data-test="endpoint"><button data-test="inject-secret" @click="$emit(\'update:endpoints\', endpoints.map((e) => ({ ...e, token: \'PROMPT_AUDIT_CANARY_SECRET_DO_NOT_PERSIST\' })))">secret</button><button data-test="probe" @click="$emit(\'probe\', endpoints[0])">probe</button></div>',
 })
+const AuditPromptStub = defineComponent({ props: ['draft'], emits: ['update:draft'], template: '<div data-test="audit-prompt" />' })
 const PolicyStub = defineComponent({ props: ['draft', 'groups'], emits: ['update:draft'], template: '<div data-test="policy" />' })
+const EnforcementStub = defineComponent({ props: ['draft'], emits: ['update:draft'], template: '<div data-test="enforcement" />' })
 const EventsStub = defineComponent({
   props: ['events', 'filters', 'selectedIds', 'loading', 'error', 'total', 'page', 'pageSize'],
   emits: ['filters-change', 'search', 'selection', 'page', 'page-size', 'view', 'delete', 'batch-delete', 'preview-delete'],
@@ -54,7 +67,7 @@ const FilterDeleteStub = defineComponent({
 
 function mountView() {
   return mount(PromptAuditView, {
-    global: { stubs: { AppLayout: AppLayoutStub, RuntimeOverview: RuntimeStub, EndpointPool: EndpointStub, PolicyPanel: PolicyStub, EventWorkspace: EventsStub, EventDetailDialog: DetailStub, FilterDeleteDialog: FilterDeleteStub, ConfirmDialog: ConfirmStub } },
+    global: { stubs: { AppLayout: AppLayoutStub, RuntimeOverview: RuntimeStub, EndpointPool: EndpointStub, AuditPromptPanel: AuditPromptStub, PolicyPanel: PolicyStub, EnforcementPanel: EnforcementStub, EventWorkspace: EventsStub, EventDetailDialog: DetailStub, FilterDeleteDialog: FilterDeleteStub, ConfirmDialog: ConfirmStub } },
   })
 }
 
@@ -155,7 +168,7 @@ describe('PromptAuditView', () => {
     await wrapper.get('[data-test="tab-config"]').trigger('click')
     await wrapper.get('[data-test="probe"]').trigger('click')
     await flushPromises()
-    expect(mocks.probeEndpoint).toHaveBeenCalledOnce()
+    expect(mocks.probeEndpoint).toHaveBeenCalledWith(expect.objectContaining({ id: 'guard-1' }), 'draft audit prompt')
     expect((wrapper.getComponent(EndpointStub).props('probeResults') as Record<string, unknown>)).toHaveProperty('guard-1')
 
     await wrapper.get('[data-test="tab-events"]').trigger('click')

@@ -49,8 +49,10 @@
                 @update:endpoints="updateEndpoints"
                 @probe="runProbe"
               />
+              <AuditPromptPanel :draft="draft" @update:draft="replaceDraft" />
               <div v-if="loadErrors.groups" role="alert" class="mt-5 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">{{ loadErrors.groups }}</div>
               <PolicyPanel :draft="draft" :groups="groups" @update:draft="replaceDraft" />
+              <EnforcementPanel :draft="draft" @update:draft="replaceDraft" />
             </template>
           </div>
 
@@ -152,7 +154,9 @@ import { useAppStore } from '@/stores/app'
 import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/apiError'
 import RuntimeOverview from './components/RuntimeOverview.vue'
 import EndpointPool from './components/EndpointPool.vue'
+import AuditPromptPanel from './components/AuditPromptPanel.vue'
 import PolicyPanel from './components/PolicyPanel.vue'
+import EnforcementPanel from './components/EnforcementPanel.vue'
 import EventWorkspace from './components/EventWorkspace.vue'
 import EventDetailDialog from './components/EventDetailDialog.vue'
 import FilterDeleteDialog from './components/FilterDeleteDialog.vue'
@@ -330,7 +334,7 @@ async function runProbe(endpoint: PromptAuditEndpointDraft) {
   if (probingIds.value.includes(endpoint.id)) return
   probingIds.value = [...probingIds.value, endpoint.id]
   try {
-    const result = await promptAuditAPI.probeEndpoint(endpoint)
+    const result = await promptAuditAPI.probeEndpoint(endpoint, draft.value?.audit_prompt ?? '')
     probeResults[endpoint.id] = result
     if (result.ok) appStore.showSuccess(t('admin.promptAudit.messages.probeSucceeded'))
     else appStore.showError(`${result.error_code || result.status}: ${result.message}`)

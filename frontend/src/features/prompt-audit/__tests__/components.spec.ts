@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { mount } from '@vue/test-utils'
 import EndpointPool from '../components/EndpointPool.vue'
+import AuditPromptPanel from '../components/AuditPromptPanel.vue'
 import PolicyPanel from '../components/PolicyPanel.vue'
+import EnforcementPanel from '../components/EnforcementPanel.vue'
 import EventWorkspace from '../components/EventWorkspace.vue'
 import EventDetailDialog from '../components/EventDetailDialog.vue'
 import FilterDeleteDialog from '../components/FilterDeleteDialog.vue'
@@ -18,9 +20,63 @@ const DialogStub = defineComponent({ props: ['show', 'title'], emits: ['close'],
 const PaginationStub = defineComponent({ props: ['total', 'page', 'pageSize'], emits: ['update:page', 'update:pageSize'], template: '<div data-test="pagination" />' })
 
 const endpoint = (): PromptAuditEndpointDraft => ({
-  id: 'guard-1', name: 'Guard One', protocol: 'openai_compatible', base_url: 'http://127.0.0.1:8000',
-  model: 'guard-model', timeout_ms: 3000, input_limit: 4000, enabled: true,
+  id: 'guard-1', name: 'Guard One', adapter: 'qwen3guard', protocol: 'openai_compatible', base_url: 'http://127.0.0.1:8000',
+  model: 'guard-model', timeout_ms: 3000, enabled: true,
   has_token: true, token_status: 'configured', token: '', clear_token: false,
+})
+
+const draft = (): PromptAuditDraft => ({
+  enabled: true,
+  blocking_enabled: false,
+  blocking_latest_turn_only: false,
+  store_pass_events: false,
+  effective_mode: 'async_audit',
+  strategy: 'ordered_all',
+  aggregation_strategy: 'any_block',
+  audit_prompt: 'admin audit prompt',
+  worker_count: 4,
+  queue_capacity: 100,
+  scanners: SCANNER_CATALOG.map((item) => item.id),
+  all_groups: false,
+  group_ids: [1, 99],
+  notifications: { admin_email: '' },
+  enforcement: {
+    email_warning: { enabled: false, rule_revision: 1, lookback_count: 10, violation_threshold: 3 },
+    account_disable: { enabled: false, violation_threshold: 5 },
+  },
+  endpoints: [endpoint()],
+  prompt_contract: { version: 'qwen-two-line-v1', fixed_output_prompt: 'Safety: Safe\\nCategories: None' },
+  config_version: 1,
+  updated_at: '',
+  updated_by: 0,
+  change_summary: '',
+})
+
+const modelResults = () => ({
+  aggregation: {
+    strategy: 'any_block' as const,
+    enabled_model_count: 1,
+    block_threshold: 1,
+    config_version: 1,
+    prompt_contract_version: 'qwen-two-line-v1',
+    audit_prompt_hash: 'c'.repeat(64),
+    partial_failure: false,
+  },
+  models: [{
+    sequence: 1,
+    endpoint_id: 'guard-1',
+    adapter: 'qwen3guard' as const,
+    model: 'guard-model',
+    safety: 'Unsafe',
+    categories: ['PII'],
+    decision: 'critical' as const,
+    action: 'Block' as const,
+    latency_ms: 10,
+    input_tokens: 12,
+    output_tokens: 8,
+    reasoning_tokens: 0,
+    error_code: '',
+  }],
 })
 
 describe('Prompt Audit components', () => {
@@ -65,14 +121,63 @@ describe('Prompt Audit components', () => {
     expect(token.attributes('placeholder')).toContain('admin.promptAudit.pool.reenterSecret')
   })
 
-  it('supports group search, stale configured groups, nine scanners, and bounded worker inputs', async () => {
-    const draft: PromptAuditDraft = {
-      enabled: true, blocking_enabled: false, blocking_latest_turn_only: false, store_pass_events: false, effective_mode: 'async_audit', strategy: 'priority',
-      worker_count: 4, queue_capacity: 100, scanners: SCANNER_CATALOG.map((item) => item.id), all_groups: false, group_ids: [1, 99],
-      endpoints: [endpoint()], config_version: 1, updated_at: '', updated_by: 0, change_summary: '',
+  it('accepts large integer model timeouts without a business maximum', async () => {
+    const wrapper = mount(EndpointPool, {
+      props: { endpoints: [endpoint()], probeResults: {}, probingIds: [] },
+      global: { stubs: { BaseDialog: DialogStub } },
+    })
+    const edit = wrapper.findAll('button').find((button) => button.text().includes('common.edit'))
+    await edit!.trigger('click')
+    const timeout = wrapper.get<HTMLInputElement>('[aria-label="admin.promptAudit.pool.timeout"]')
+    expect(timeout.attributes('max')).toBeUndefined()
+    await timeout.setValue('300000')
+    await wrapper.get('[data-test="save-endpoint"]').trigger('click')
+    const updated = wrapper.emitted('update:endpoints')?.at(-1)?.[0] as PromptAuditEndpointDraft[]
+    expect(updated[0].timeout_ms).toBe(300000)
+  })
+
+  it('rejects unsafe or sub-minimum model timeouts', async () => {
+    for (const value of ['99', '9007199254740992']) {
+      const wrapper = mount(EndpointPool, {
+        props: { endpoints: [endpoint()], probeResults: {}, probingIds: [] },
+        global: { stubs: { BaseDialog: DialogStub } },
+      })
+      const edit = wrapper.findAll('button').find((button) => button.text().includes('common.edit'))
+      await edit!.trigger('click')
+      await wrapper.get<HTMLInputElement>('[aria-label="admin.promptAudit.pool.timeout"]').setValue(value)
+      await wrapper.get('[data-test="save-endpoint"]').trigger('click')
+      expect(wrapper.emitted('update:endpoints')).toBeUndefined()
     }
+  })
+
+  it('reorders audit models without changing their configured values', async () => {
+    const second = { ...endpoint(), id: 'guard-2', name: 'Guard Two' }
+    const wrapper = mount(EndpointPool, {
+      props: { endpoints: [endpoint(), second], probeResults: {}, probingIds: [] },
+      global: { stubs: { BaseDialog: DialogStub } },
+    })
+    await wrapper.get('[aria-label="admin.promptAudit.pool.moveDown"]').trigger('click')
+    const reordered = wrapper.emitted('update:endpoints')?.at(-1)?.[0] as PromptAuditEndpointDraft[]
+    expect(reordered.map((item) => item.id)).toEqual(['guard-2', 'guard-1'])
+    expect(reordered[1]).toMatchObject(endpoint())
+  })
+
+  it('edits only the admin audit prompt and renders the backend contract read-only', async () => {
+    const config = draft()
+    config.endpoints[0].adapter = 'openai_compatible_qwen'
+    const wrapper = mount(AuditPromptPanel, { props: { draft: config } })
+    expect(wrapper.get('[data-test="fixed-output-prompt"]').element.tagName).toBe('PRE')
+    expect(wrapper.get('[data-test="fixed-output-prompt"]').text()).toContain('Safety: Safe')
+    await wrapper.get<HTMLTextAreaElement>('[aria-label="admin.promptAudit.auditPrompt.editable"]').setValue('')
+    const updated = wrapper.emitted('update:draft')?.at(-1)?.[0] as PromptAuditDraft
+    expect(updated.audit_prompt).toBe('')
+    expect(updated.prompt_contract).toEqual(config.prompt_contract)
+  })
+
+  it('supports group search, stale configured groups, nine scanners, and bounded worker inputs', async () => {
+    const config = draft()
     const wrapper = mount(PolicyPanel, {
-      props: { draft, groups: [{ id: 1, name: 'Alpha', platform: 'openai', status: 'active' }, { id: 2, name: 'Beta', platform: 'claude', status: 'inactive' }] },
+      props: { draft: config, groups: [{ id: 1, name: 'Alpha', platform: 'openai', status: 'active' }, { id: 2, name: 'Beta', platform: 'claude', status: 'inactive' }] },
     })
     expect(wrapper.text()).toContain('99')
     expect(wrapper.findAll('input[type="checkbox"]').filter((input) => SCANNER_CATALOG.some((scanner) => input.attributes('aria-label') === `admin.promptAudit.scanners.${scanner.id}`))).toHaveLength(9)
@@ -84,9 +189,19 @@ describe('Prompt Audit components', () => {
     expect(emitted.worker_count).toBe(6)
   })
 
+  it('keeps warning and account-disable controls independent', async () => {
+    const wrapper = mount(EnforcementPanel, { props: { draft: draft() } })
+    const switches = wrapper.findAll('input[type="checkbox"]')
+    expect(switches).toHaveLength(2)
+    await switches[0].setValue(true)
+    const warningUpdate = wrapper.emitted('update:draft')?.at(-1)?.[0] as PromptAuditDraft
+    expect(warningUpdate.enforcement.email_warning.enabled).toBe(true)
+    expect(warningUpdate.enforcement.account_disable.enabled).toBe(false)
+  })
+
   it('keeps identity fields separate, supports selection, and opens filter deletion from the toolbar', async () => {
     const event: PromptAuditEvent = {
-      id: 1, job_id: 1, decision: 'critical', risk_level: 'critical', action: 'Block', categories: ['pii'], matched_scanners: ['pii'], scanner_scores: { pii: 1 }, scanner_evidence: { pii: 'redacted' }, scanner_backend: 'qwen3guard-openai', scanner_version: '1', guard_endpoint_id: 'guard-1', policy_id: 'priority', policy_version: 1, config_version: 1, chunk_total: 1, latency_ms: 10, issue_summaries: [], created_at: '2026-07-16T00:00:00Z',
+      id: 1, job_id: 1, decision: 'critical', risk_level: 'critical', action: 'Block', categories: ['pii'], matched_scanners: ['pii'], scanner_scores: { pii: 1 }, scanner_evidence: { pii: 'redacted' }, scanner_backend: 'qwen3guard-openai', scanner_version: '1', guard_endpoint_id: 'guard-1', policy_id: 'ordered_all', policy_version: 1, config_version: 1, chunk_total: 1, latency_ms: 10, model_results: modelResults(), issue_summaries: [], created_at: '2026-07-16T00:00:00Z',
       snapshot: { request_id: 'req-1', user_id: 1, username: 'alice', user_email: 'alice@example.test', api_key_id: 2, api_key_name: 'alice-key', group_id: 3, group_name: 'Alpha', provider: 'openai', endpoint: '/v1/chat/completions', protocol: 'openai_chat', model: 'gpt-test', prompt_hash: 'a'.repeat(64), redacted_preview: 'redacted preview', full_prompt: 'full prompt text', prompt_length: 10, message_count: 1, stage: 'http' },
     }
     const wrapper = mount(EventWorkspace, {
@@ -208,7 +323,8 @@ describe('Prompt Audit components', () => {
       scanner_scores: { sexual_content_or_sexual_acts: 1 },
       scanner_evidence: { sexual_content_or_sexual_acts: 'Sexual Content or Sexual Acts' },
       scanner_backend: 'qwen3guard-openai', scanner_version: 'qwen3guard', guard_endpoint_id: 'guard-1',
-      policy_id: 'priority', policy_version: 1, config_version: 1, chunk_total: 1, latency_ms: 12,
+      policy_id: 'ordered_all', policy_version: 1, config_version: 1, chunk_total: 1, latency_ms: 12,
+      model_results: modelResults(),
       issue_summaries: [{
         category: 'sexual_content_or_sexual_acts', scanner_id: 'sexual_content_or_sexual_acts',
         title: '性内容或性行为', description: 'Sexual content or sexual acts', severity: 'critical',
@@ -243,6 +359,13 @@ describe('Prompt Audit components', () => {
     expect(wrapper.get('[data-test="risk-guard-return"]').text()).toContain('"decision": "admin.promptAudit.decisions.critical"')
     expect(wrapper.get('[data-test="risk-guard-return"]').text()).toContain('admin.promptAudit.scanners.sexual_content_or_sexual_acts')
     expect(wrapper.get('[data-test="risk-issue"]').text()).toContain('admin.promptAudit.scanners.sexual_content_or_sexual_acts')
+
+    const technicalTab = wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes('admin.promptAudit.events.tabs.technical'))
+    await technicalTab!.trigger('click')
+    expect(wrapper.text()).toContain('Unsafe')
+    expect(wrapper.text()).toContain('PII')
+    expect(wrapper.text()).toContain('qwen-two-line-v1')
+    expect(wrapper.get('[data-test="model-usage"]').text()).toBe('12/8/0')
   })
 
   it('falls back to the redacted preview for events stored before full prompts were kept', async () => {
@@ -250,7 +373,8 @@ describe('Prompt Audit components', () => {
       id: 2, job_id: 2, decision: 'flag', risk_level: 'medium', action: 'Warn',
       categories: ['pii'], matched_scanners: ['pii'], scanner_scores: {}, scanner_evidence: {},
       scanner_backend: 'qwen3guard-openai', scanner_version: '1', guard_endpoint_id: 'guard-1',
-      policy_id: 'priority', policy_version: 1, config_version: 1, chunk_total: 1, latency_ms: 5,
+      policy_id: 'ordered_all', policy_version: 1, config_version: 1, chunk_total: 1, latency_ms: 5,
+      model_results: modelResults(),
       issue_summaries: [], created_at: '2026-07-16T00:00:00Z',
       snapshot: {
         request_id: 'req-2', user_id: 1, username: 'bob', user_email: '', api_key_id: 2,

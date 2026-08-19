@@ -1,11 +1,15 @@
 package securityaudit
 
-import "github.com/google/wire"
+import (
+	appservice "github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/google/wire"
+)
 
 var ProviderSet = wire.NewSet(
 	NewPostgreSQLRepository,
 	wire.Bind(new(JobRepository), new(*PostgreSQLRepository)),
 	wire.Bind(new(EventRepository), new(*PostgreSQLRepository)),
+	wire.Bind(new(appservice.PromptAuditCounterResetter), new(*PostgreSQLRepository)),
 	NewRedisPayloadStore,
 	wire.Bind(new(PayloadStore), new(*RedisPayloadStore)),
 	NewOpenAICompatibleScanner,

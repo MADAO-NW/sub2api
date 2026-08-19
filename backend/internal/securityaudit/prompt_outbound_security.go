@@ -60,6 +60,10 @@ func NewSecureHTTPClient(endpoint ActiveEndpoint) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	timeout, err := timeoutDuration(endpoint.TimeoutMS)
+	if err != nil {
+		return nil, err
+	}
 	dialer := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		// Do not inherit HTTP(S)_PROXY. A proxy would move the actual destination
@@ -70,7 +74,7 @@ func NewSecureHTTPClient(endpoint ActiveEndpoint) (*http.Client, error) {
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: time.Duration(endpoint.TimeoutMS) * time.Millisecond,
+		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: time.Second,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 	}
@@ -78,10 +82,6 @@ func NewSecureHTTPClient(endpoint ActiveEndpoint) (*http.Client, error) {
 	// Use the standard dialer so configured private, loopback, reserved, and
 	// DNS-resolved addresses are all reachable from the service environment.
 	transport.DialContext = dialer.DialContext
-	timeout := time.Duration(endpoint.TimeoutMS) * time.Millisecond
-	if timeout <= 0 {
-		timeout = DefaultTimeoutMS * time.Millisecond
-	}
 	return &http.Client{
 		Transport: transport,
 		Timeout:   timeout,

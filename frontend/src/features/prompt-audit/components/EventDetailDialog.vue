@@ -58,18 +58,70 @@
           </div>
         </div>
 
-        <dl v-show="activeTab === 'technical'" class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm" role="tabpanel">
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.requestId') }}</dt><dd class="break-all font-mono">{{ event.snapshot.request_id || '—' }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.promptHash') }}</dt><dd class="break-all font-mono">{{ event.snapshot.prompt_hash }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.scanner') }}</dt><dd>{{ event.scanner_backend }} · {{ event.scanner_version }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.policy') }}</dt><dd>{{ event.policy_id }} · v{{ event.policy_version }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.guardEndpoint') }}</dt><dd>{{ event.guard_endpoint_id }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.config') }}</dt><dd>v{{ event.config_version }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.chunks') }}</dt><dd>{{ event.chunk_total }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.latency') }}</dt><dd>{{ event.latency_ms }} ms</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.stage') }}</dt><dd>{{ event.snapshot.stage || 'http' }}</dd>
-          <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.protocol') }}</dt><dd>{{ event.snapshot.protocol }} · {{ event.snapshot.endpoint }}</dd>
-        </dl>
+        <div v-show="activeTab === 'technical'" class="space-y-5" role="tabpanel">
+          <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.requestId') }}</dt><dd class="break-all font-mono">{{ event.snapshot.request_id || '—' }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.promptHash') }}</dt><dd class="break-all font-mono">{{ event.snapshot.prompt_hash }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.scanner') }}</dt><dd>{{ event.scanner_backend }} · {{ event.scanner_version }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.policy') }}</dt><dd>{{ event.policy_id }} · v{{ event.policy_version }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.guardEndpoint') }}</dt><dd>{{ event.guard_endpoint_id }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.config') }}</dt><dd>v{{ event.config_version }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.latency') }}</dt><dd>{{ event.latency_ms }} ms</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.stage') }}</dt><dd>{{ event.snapshot.stage || 'http' }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.protocol') }}</dt><dd>{{ event.snapshot.protocol }} · {{ event.snapshot.endpoint }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.aggregation') }}</dt>
+            <dd>
+              {{ t(`admin.promptAudit.policy.aggregationOptions.${event.model_results.aggregation.strategy}`) }}
+              · {{ event.model_results.aggregation.enabled_model_count }}
+              · {{ t('admin.promptAudit.events.technical.thresholdValue', { value: event.model_results.aggregation.block_threshold }) }}
+              <span v-if="event.model_results.aggregation.partial_failure" class="ml-2 text-amber-600 dark:text-amber-300">
+                {{ t('admin.promptAudit.events.technical.partialFailure') }}
+              </span>
+            </dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.promptContract') }}</dt>
+            <dd class="break-all font-mono text-xs">{{ event.model_results.aggregation.prompt_contract_version }} · {{ event.model_results.aggregation.audit_prompt_hash }}</dd>
+          </dl>
+
+          <section>
+            <h4 class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.promptAudit.events.technical.modelResults') }}</h4>
+            <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.promptAudit.events.technical.modelResultsHint') }}</p>
+            <div class="mt-3 overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
+              <table class="min-w-full text-left text-xs">
+                <thead class="bg-gray-50 text-gray-500 dark:bg-dark-900/60 dark:text-dark-400">
+                  <tr>
+                    <th class="px-3 py-2 font-medium">#</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.pool.node') }}</th>
+                    <th class="px-3 py-2 font-medium">Safety</th>
+                    <th class="px-3 py-2 font-medium">Categories</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.events.decision') }}</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.events.technical.latency') }}</th>
+                    <th class="px-3 py-2 font-medium">Usage</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.events.technical.errorCode') }}</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 dark:divide-dark-800">
+                  <tr v-for="model in event.model_results.models" :key="`${model.sequence}-${model.endpoint_id}`">
+                    <td class="px-3 py-2 tabular-nums">{{ model.sequence }}</td>
+                    <td class="px-3 py-2">
+                      <p class="font-medium text-gray-900 dark:text-white">{{ model.endpoint_id }}</p>
+                      <p class="mt-0.5 text-[11px] text-gray-500 dark:text-dark-400">{{ model.adapter }} · {{ model.model }}</p>
+                    </td>
+                    <td class="px-3 py-2 font-mono">{{ model.safety || '—' }}</td>
+                    <td class="max-w-72 px-3 py-2">{{ model.categories?.length ? model.categories.join(', ') : '—' }}</td>
+                    <td class="whitespace-nowrap px-3 py-2">
+                      {{ model.decision ? formatDecisionAction(model.decision, model.action || '') : '—' }}
+                    </td>
+                    <td class="whitespace-nowrap px-3 py-2 tabular-nums">{{ model.latency_ms }} ms</td>
+                    <td class="whitespace-nowrap px-3 py-2 tabular-nums" data-test="model-usage">
+                      {{ formatModelUsage(model) }}
+                    </td>
+                    <td class="px-3 py-2 font-mono text-[11px]" :class="model.error_code ? 'text-red-600 dark:text-red-300' : ''">{{ model.error_code || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   </BaseDialog>
@@ -137,6 +189,11 @@ function formatGuardReturn(event: PromptAuditEvent): string {
     chunk_total: event.chunk_total,
     latency_ms: event.latency_ms,
   }, null, 2)
+}
+function formatModelUsage(model: PromptAuditEvent['model_results']['models'][number]): string {
+  const values = [model.input_tokens, model.output_tokens, model.reasoning_tokens]
+  if (values.every((value) => value == null)) return '—'
+  return values.map((value) => value ?? '—').join('/')
 }
 function issueTitle(issue: PromptIssueSummary): string {
   return translateCategory(issue.category || issue.scanner_id) || issue.title

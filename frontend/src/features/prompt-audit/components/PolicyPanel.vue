@@ -54,6 +54,46 @@
       </div>
 
       <div class="space-y-4 rounded-xl border border-gray-200 p-4 dark:border-dark-700/60 dark:bg-dark-900/20 sm:p-5">
+        <fieldset>
+          <legend class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.promptAudit.policy.aggregation') }}</legend>
+          <div class="mt-3 space-y-2">
+            <label
+              v-for="strategy in aggregationStrategies"
+              :key="strategy"
+              class="flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2.5 text-sm"
+              :class="draft.aggregation_strategy === strategy
+                ? 'border-primary-300 bg-primary-50 text-primary-900 dark:border-primary-800 dark:bg-primary-950/30 dark:text-primary-100'
+                : 'border-gray-200 text-gray-700 dark:border-dark-700 dark:text-dark-200'"
+            >
+              <input
+                type="radio"
+                name="prompt-audit-aggregation"
+                class="mt-0.5"
+                :checked="draft.aggregation_strategy === strategy"
+                @change="patch({ aggregation_strategy: strategy })"
+              />
+              <span>
+                <span class="font-medium">{{ t(`admin.promptAudit.policy.aggregationOptions.${strategy}`) }}</span>
+                <span class="mt-0.5 block text-xs opacity-75">{{ t(`admin.promptAudit.policy.aggregationHints.${strategy}`) }}</span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <dl class="grid grid-cols-2 gap-3 rounded-lg bg-gray-50 px-4 py-3 text-sm dark:bg-dark-900/50">
+          <div>
+            <dt class="text-xs text-gray-500 dark:text-dark-400">{{ t('admin.promptAudit.policy.enabledModels') }}</dt>
+            <dd class="mt-1 font-semibold tabular-nums text-gray-900 dark:text-white">{{ enabledModelCount }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs text-gray-500 dark:text-dark-400">{{ t('admin.promptAudit.policy.blockThreshold') }}</dt>
+            <dd class="mt-1 font-semibold tabular-nums text-gray-900 dark:text-white">{{ blockThreshold }}</dd>
+          </div>
+          <p class="col-span-2 text-xs leading-5 text-gray-500 dark:text-dark-400">
+            {{ t('admin.promptAudit.policy.strategyHint') }}
+          </p>
+        </dl>
+
         <label class="block text-sm text-gray-700 dark:text-dark-200">
           <span>{{ t('admin.promptAudit.policy.workerCount') }}</span>
           <input :value="draft.worker_count" type="number" min="1" max="32" class="input mt-1.5 w-full" :aria-label="t('admin.promptAudit.policy.workerCount')" @input="patch({ worker_count: Number(($event.target as HTMLInputElement).value) })" />
@@ -62,10 +102,6 @@
           <span>{{ t('admin.promptAudit.policy.queueCapacity') }}</span>
           <input :value="draft.queue_capacity" type="number" min="1" max="100000" class="input mt-1.5 w-full" :aria-label="t('admin.promptAudit.policy.queueCapacity')" @input="patch({ queue_capacity: Number(($event.target as HTMLInputElement).value) })" />
         </label>
-        <div class="rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:bg-dark-900/50 dark:text-dark-300">
-          <p class="font-medium text-gray-800 dark:text-dark-100">{{ t('admin.promptAudit.policy.strategy') }}</p>
-          <p class="mt-1">priority · {{ t('admin.promptAudit.policy.strategyHint') }}</p>
-        </div>
       </div>
     </div>
   </section>
@@ -74,13 +110,14 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { PromptAuditDraft, PromptAuditGroup } from '../types'
+import type { PromptAggregationStrategy, PromptAuditDraft, PromptAuditGroup } from '../types'
 import { cloneData, SCANNER_CATALOG } from '../viewModel'
 
 const props = defineProps<{ draft: PromptAuditDraft; groups: PromptAuditGroup[] }>()
 const emit = defineEmits<{ (event: 'update:draft', value: PromptAuditDraft): void }>()
 const { t } = useI18n()
 const groupSearch = ref('')
+const aggregationStrategies: PromptAggregationStrategy[] = ['any_block', 'majority_block', 'all_block']
 
 const filteredGroups = computed(() => {
   const query = groupSearch.value.trim().toLowerCase()
@@ -89,6 +126,14 @@ const filteredGroups = computed(() => {
 })
 const knownGroupIds = computed(() => new Set(props.groups.map((group) => group.id)))
 const missingGroupIds = computed(() => props.draft.group_ids.filter((id) => !knownGroupIds.value.has(id)))
+const enabledModelCount = computed(() => props.draft.endpoints.filter((endpoint) => endpoint.enabled).length)
+const blockThreshold = computed(() => {
+  const count = enabledModelCount.value
+  if (count === 0) return 0
+  if (props.draft.aggregation_strategy === 'any_block') return 1
+  if (props.draft.aggregation_strategy === 'all_block') return count
+  return Math.floor(count / 2) + 1
+})
 
 function patch(value: Partial<PromptAuditDraft>) {
   emit('update:draft', { ...cloneData(props.draft), ...value })

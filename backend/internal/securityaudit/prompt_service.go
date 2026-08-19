@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	appservice "github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 type PromptService struct {
@@ -21,6 +21,7 @@ type PromptService struct {
 	evaluator *GuardEvaluator
 	scanner   *OpenAICompatibleScanner
 	metrics   *AtomicMetrics
+	notifier  *PromptNotificationWorker
 	clock     Clock
 
 	lifecycleMu  sync.Mutex
@@ -38,13 +39,16 @@ func NewPromptService(
 	payload *RedisPayloadStore,
 	scanner *OpenAICompatibleScanner,
 	metrics *AtomicMetrics,
+	authCacheInvalidator appservice.APIKeyAuthCacheInvalidator,
+	notificationEmailService *appservice.NotificationEmailService,
 ) *PromptService {
 	enqueuer := NewEnqueuer(config, repo, payload, metrics)
-	evaluator := NewGuardEvaluator(scanner, repo, metrics)
-	runner := NewRunner(config, repo, payload, scanner, metrics)
+	evaluator := NewGuardEvaluator(scanner, repo, metrics, authCacheInvalidator)
+	runner := NewRunner(config, repo, payload, scanner, metrics, authCacheInvalidator)
 	return &PromptService{
 		config: config, repo: repo, payload: payload, scanner: scanner, metrics: metrics,
-		enqueuer: enqueuer, evaluator: evaluator, runner: runner, clock: realClock{},
+		enqueuer: enqueuer, evaluator: evaluator, runner: runner,
+		notifier: NewPromptNotificationWorker(repo, notificationEmailService), clock: realClock{},
 		enqueueSlots: make(chan struct{}, 128), probes: map[string]ProbeResult{},
 	}
 }
@@ -63,6 +67,7 @@ func (s *PromptService) Start(ctx context.Context) error {
 	s.lifecycleMu.Unlock()
 	configErr := s.config.Start(background)
 	workerErr := s.runner.Start(background)
+	s.notifier.Start(background)
 	return errors.Join(configErr, workerErr)
 }
 
@@ -80,6 +85,9 @@ func (s *PromptService) Shutdown(ctx context.Context) error {
 	var workerErr error
 	if s.runner != nil {
 		workerErr = s.runner.Shutdown(ctx)
+	}
+	if s.notifier != nil {
+		s.notifier.Wait()
 	}
 	done := make(chan struct{})
 	go func() { s.enqueueWG.Wait(); close(done) }()
@@ -185,6 +193,32 @@ func (s *PromptService) Runtime(ctx context.Context) RuntimeSnapshot {
 		ActiveConfigVersion: activeVersion, ConfigLoadedAt: loadedAt, ConfigLoadError: loadError,
 		WorkerTotal: workerTotal, QueueCapacity: queueCapacity, DatabaseStatus: "ok", RedisStatus: "ok",
 		Endpoints: s.probeSnapshot(), GuardMetrics: s.metrics.Snapshot(),
+		PromptContractVersion: PromptContractVersion, EvaluationMetrics: s.metrics.EvaluationSnapshot(),
+		Models: []RuntimeModelSnapshot{},
+	}
+	if hasConfig {
+		runtime.AggregationStrategy = cfg.AggregationStrategy
+		runtime.EnabledModelCount = len(cfg.EnabledEndpoints())
+		runtime.BlockThreshold = CalculateBlockThreshold(cfg.AggregationStrategy, runtime.EnabledModelCount)
+		runtime.AuditPromptHash = promptAuditHash(cfg.AuditPrompt)
+		endpointIDs := make([]string, 0, len(cfg.Endpoints))
+		for _, endpoint := range cfg.Endpoints {
+			endpointIDs = append(endpointIDs, endpoint.ID)
+		}
+		modelMetrics := s.metrics.ModelSnapshot(endpointIDs)
+		runtime.Models = make([]RuntimeModelSnapshot, 0, len(cfg.Endpoints))
+		for index, endpoint := range cfg.Endpoints {
+			model := RuntimeModelSnapshot{
+				Sequence: index + 1, ID: endpoint.ID, Name: endpoint.Name, Adapter: endpoint.Adapter,
+				Model: endpoint.Model, Enabled: endpoint.Enabled, TimeoutMS: endpoint.TimeoutMS,
+				Metrics: modelMetrics[endpoint.ID],
+			}
+			if probe, ok := runtime.Endpoints[endpoint.ID]; ok {
+				probeCopy := probe
+				model.Probe = &probeCopy
+			}
+			runtime.Models = append(runtime.Models, model)
+		}
 	}
 	if s.repo != nil {
 		stats, err := s.repo.QueueStats(ctx)
@@ -193,6 +227,15 @@ func (s *PromptService) Runtime(ctx context.Context) RuntimeSnapshot {
 			runtime.LastErrorCode = "database_unavailable"
 		} else {
 			runtime.Queue = stats
+		}
+		enforcement, enforcementErr := s.repo.EnforcementRuntimeStats(ctx)
+		if enforcementErr != nil {
+			runtime.DatabaseStatus = "error"
+			if runtime.LastErrorCode == "" {
+				runtime.LastErrorCode = "database_unavailable"
+			}
+		} else {
+			runtime.Enforcement = enforcement
 		}
 	} else {
 		runtime.DatabaseStatus = "error"
@@ -226,7 +269,8 @@ func (s *PromptService) Runtime(ctx context.Context) RuntimeSnapshot {
 }
 
 type ProbeRequest struct {
-	Endpoint UpdateEndpoint `json:"endpoint"`
+	Endpoint    UpdateEndpoint `json:"endpoint"`
+	AuditPrompt string         `json:"audit_prompt"`
 }
 
 func (s *PromptService) Probe(ctx context.Context, request ProbeRequest) ProbeResult {
@@ -236,58 +280,38 @@ func (s *PromptService) Probe(ctx context.Context, request ProbeRequest) ProbeRe
 		return s.finishProbe(request.Endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: "endpoint_invalid", Message: "审计节点配置无效"})
 	}
 	LogInfo(EventProbeStarted, map[string]any{"guard_endpoint_id": endpoint.ID, "status": "started"})
-	client, err := NewSecureHTTPClient(endpoint)
-	if err != nil {
-		return s.finishProbe(endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: "endpoint_unsafe", Message: "审计节点地址不在允许范围", TokenApplied: tokenApplied})
+	if endpoint.Adapter == AdapterOpenAICompatibleQwen && strings.TrimSpace(request.AuditPrompt) == "" {
+		return s.finishProbe(endpoint.ID, started, ProbeResult{
+			Status: "failed", ErrorCode: "audit_prompt_required",
+			Message: "第三方审核模型需要非空审核提示词", TokenApplied: tokenApplied,
+		})
 	}
-	modelsURL, _ := ModelsURL(endpoint.BaseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
-	if err != nil {
-		return s.finishProbe(endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: "probe_request_invalid", Message: "无法创建探测请求", TokenApplied: tokenApplied})
+	result, scanErr := s.scanner.Scan(ctx, ModelScanRequest{
+		Endpoint: endpoint, FullPrompt: "This is a harmless connection test.",
+		AuditPrompt: request.AuditPrompt, EnabledScanners: AllScannerIDs,
+	})
+	if scanErr == nil && result != nil {
+		return s.finishProbe(endpoint.ID, started, ProbeResult{
+			OK: true, Status: "healthy", Message: "审计节点模型调用和输出协议正常",
+			HTTPStatus: http.StatusOK, TokenApplied: tokenApplied,
+		})
 	}
-	if endpoint.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+endpoint.Token)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		code := "connection_failed"
-		var netErr net.Error
-		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-			code = "timeout"
+	code, status, retryable := guardErrorCode(scanErr), 0, false
+	message := "审计节点模型调用失败"
+	var guardErr *GuardError
+	if errors.As(scanErr, &guardErr) {
+		status, retryable = guardErr.HTTPStatus, guardErr.Retryable
+		if guardErr.Code == ErrorCodeInvalidResponse && status >= 200 && status < 300 {
+			message = "审计节点连接成功，但输出协议无效"
 		}
-		return s.finishProbe(endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: code, Message: "无法连接审计节点", Retryable: true, TokenApplied: tokenApplied})
 	}
-	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGuardResponseBytes+1))
-	_ = resp.Body.Close()
-	if readErr != nil {
-		return s.finishProbe(endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: "response_read_failed", Message: "审计节点响应读取失败", HTTPStatus: resp.StatusCode, Retryable: true, TokenApplied: tokenApplied})
+	if code == "" {
+		code = ErrorCodeInvalidResponse
 	}
-	if int64(len(responseBody)) > maxGuardResponseBytes {
-		return s.finishProbe(endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: "response_too_large", Message: "审计节点响应无效", HTTPStatus: resp.StatusCode, TokenApplied: tokenApplied})
-	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && modelsResponseReady(responseBody, endpoint.Model) {
-		return s.finishProbe(endpoint.ID, started, ProbeResult{OK: true, Status: "healthy", Message: "审计节点连接正常", HTTPStatus: resp.StatusCode, TokenApplied: tokenApplied})
-	}
-	if (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		result, scanErr := s.scanner.Scan(ctx, endpoint, "Hello", AllScannerIDs)
-		if scanErr == nil && result != nil {
-			return s.finishProbe(endpoint.ID, started, ProbeResult{OK: true, Status: "healthy", Message: "审计节点模型调用正常", HTTPStatus: http.StatusOK, TokenApplied: tokenApplied})
-		}
-		code, status, retryable := guardErrorCode(scanErr), 0, false
-		var guardErr *GuardError
-		if errors.As(scanErr, &guardErr) {
-			status, retryable = guardErr.HTTPStatus, guardErr.Retryable
-		}
-		if code == "" {
-			code = ErrorCodeInvalidResponse
-		}
-		return s.finishProbe(endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: code, Message: "审计节点模型调用失败", HTTPStatus: status, Retryable: retryable, TokenApplied: tokenApplied})
-	}
-	code, retryable := "probe_http_error", resp.StatusCode == 429 || resp.StatusCode >= 500
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		code = "authentication_failed"
-	}
-	return s.finishProbe(endpoint.ID, started, ProbeResult{Status: "failed", ErrorCode: code, Message: "审计节点探测失败", HTTPStatus: resp.StatusCode, Retryable: retryable, TokenApplied: tokenApplied})
+	return s.finishProbe(endpoint.ID, started, ProbeResult{
+		Status: "failed", ErrorCode: code, Message: message, HTTPStatus: status,
+		Retryable: retryable, TokenApplied: tokenApplied,
+	})
 }
 
 func modelsResponseReady(body []byte, model string) bool {
@@ -341,12 +365,19 @@ func (s *PromptService) resolveProbeEndpoint(input UpdateEndpoint) (ActiveEndpoi
 	if timeout == 0 {
 		timeout = DefaultTimeoutMS
 	}
-	limit := input.InputLimit
-	if limit == 0 {
-		limit = DefaultInputLimit
+	adapter := strings.TrimSpace(input.Adapter)
+	if adapter == "" {
+		adapter = AdapterQwen3Guard
 	}
-	storage := storageConfig{Enabled: false, Strategy: "priority", WorkerCount: DefaultWorkerCount, QueueCapacity: DefaultQueueCapacity, Scanners: append([]string(nil), AllScannerIDs...), AllGroups: true,
-		Endpoints: []StorageEndpoint{{ID: strings.TrimSpace(input.ID), Name: strings.TrimSpace(input.Name), Protocol: "openai_compatible", BaseURL: baseURL, Model: model, TimeoutMS: timeout, InputLimit: limit}}}
+	storage := storageConfig{
+		Enabled: false, Strategy: StrategyOrderedAll, AggregationStrategy: AggregationAnyBlock,
+		AuditPrompt: DefaultAuditPrompt, WorkerCount: DefaultWorkerCount, QueueCapacity: DefaultQueueCapacity,
+		Scanners: append([]string(nil), AllScannerIDs...), AllGroups: true,
+		Endpoints: []StorageEndpoint{{
+			ID: strings.TrimSpace(input.ID), Name: strings.TrimSpace(input.Name), Adapter: adapter,
+			Protocol: "openai_compatible", BaseURL: baseURL, Model: model, TimeoutMS: timeout,
+		}},
+	}
 	if storage.Endpoints[0].ID == "" {
 		storage.Endpoints[0].ID = "probe"
 	}
@@ -356,7 +387,11 @@ func (s *PromptService) resolveProbeEndpoint(input UpdateEndpoint) (ActiveEndpoi
 	if err := validateStorageConfig(storage); err != nil {
 		return ActiveEndpoint{}, false, err
 	}
-	return ActiveEndpoint{ID: storage.Endpoints[0].ID, Name: storage.Endpoints[0].Name, Protocol: "openai_compatible", BaseURL: baseURL, Model: model, Token: token, TimeoutMS: timeout, InputLimit: limit, Enabled: true}, token != "", nil
+	return ActiveEndpoint{
+		ID: storage.Endpoints[0].ID, Name: storage.Endpoints[0].Name, Adapter: adapter,
+		Protocol: "openai_compatible", BaseURL: baseURL, Model: model, Token: token,
+		TimeoutMS: timeout, Enabled: true,
+	}, token != "", nil
 }
 
 func (s *PromptService) finishProbe(id string, started time.Time, result ProbeResult) ProbeResult {

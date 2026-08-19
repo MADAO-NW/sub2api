@@ -323,13 +323,13 @@ func eventColumns(alias string) string {
 // eventDetailColumns adds the full prompt, which can be large, so it is only
 // loaded for single-event detail reads and never for list pages.
 func eventDetailColumns(alias string) string {
-	return eventColumns(alias) + fmt.Sprintf(",%[1]s.full_prompt", alias)
+	return eventColumns(alias) + fmt.Sprintf(",%[1]s.full_prompt,%[1]s.model_results", alias)
 }
 
 func scanEvent(row rowScanner, withFullPrompt ...bool) (*Event, error) {
 	event := &Event{}
 	var userID, apiKeyID, groupID sql.NullInt64
-	var categories, matched, scores, evidence []byte
+	var categories, matched, scores, evidence, modelResults []byte
 	dest := []any{&event.ID, &event.JobID, &event.Snapshot.RequestID, &userID,
 		&event.Snapshot.UsernameSnapshot, &event.Snapshot.UserEmailSnapshot, &apiKeyID,
 		&event.Snapshot.APIKeyNameSnapshot, &groupID, &event.Snapshot.GroupName,
@@ -339,7 +339,7 @@ func scanEvent(row rowScanner, withFullPrompt ...bool) (*Event, error) {
 		&event.ScannerVersion, &event.GuardEndpointID, &event.PolicyID, &event.PolicyVersion,
 		&event.ConfigVersion, &event.ChunkTotal, &event.LatencyMS, &event.CreatedAt}
 	if len(withFullPrompt) > 0 && withFullPrompt[0] {
-		dest = append(dest, &event.Snapshot.FullPrompt)
+		dest = append(dest, &event.Snapshot.FullPrompt, &modelResults)
 	}
 	err := row.Scan(dest...)
 	if err != nil {
@@ -352,6 +352,7 @@ func scanEvent(row rowScanner, withFullPrompt ...bool) (*Event, error) {
 	_ = json.Unmarshal(matched, &event.MatchedScanners)
 	_ = json.Unmarshal(scores, &event.ScannerScores)
 	_ = json.Unmarshal(evidence, &event.ScannerEvidence)
+	_ = json.Unmarshal(modelResults, &event.ModelResults)
 	result := NormalizedResult{Decision: event.Decision, RiskLevel: event.RiskLevel, Action: event.Action,
 		Categories: event.Categories, MatchedScanners: event.MatchedScanners, ScannerScores: event.ScannerScores,
 		ScannerEvidence: event.ScannerEvidence}

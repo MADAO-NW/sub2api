@@ -27,9 +27,34 @@ type AtomicMetrics struct {
 	latencyMu    sync.RWMutex
 	latencies    []int64
 	latencyNext  int
+	modelMu      sync.RWMutex
+	models       map[string]*endpointMetric
+	evaluation   evaluationMetric
 }
 
-func NewAtomicMetrics() *AtomicMetrics { return &AtomicMetrics{} }
+type endpointMetric struct {
+	requests        int64
+	pass            int64
+	flag            int64
+	critical        int64
+	errors          int64
+	inputTokens     int64
+	outputTokens    int64
+	reasoningTokens int64
+	latencies       []int64
+	latencyNext     int
+}
+
+type evaluationMetric struct {
+	total          int64
+	partialFailure int64
+	latencies      []int64
+	latencyNext    int
+}
+
+func NewAtomicMetrics() *AtomicMetrics {
+	return &AtomicMetrics{models: map[string]*endpointMetric{}}
+}
 
 func (m *AtomicMetrics) Snapshot() GuardMetricsSnapshot {
 	if m == nil {
@@ -142,4 +167,106 @@ func (m *AtomicMetrics) IncRecordFailed() {
 	if m != nil {
 		m.recordFailed.Add(1)
 	}
+}
+
+func (m *AtomicMetrics) ObserveModel(result ModelAuditResult) {
+	if m == nil || result.EndpointID == "" {
+		return
+	}
+	m.modelMu.Lock()
+	defer m.modelMu.Unlock()
+	if m.models == nil {
+		m.models = map[string]*endpointMetric{}
+	}
+	metric := m.models[result.EndpointID]
+	if metric == nil {
+		metric = &endpointMetric{}
+		m.models[result.EndpointID] = metric
+	}
+	metric.requests++
+	switch {
+	case result.ErrorCode != "":
+		metric.errors++
+	case result.Decision == EventCritical:
+		metric.critical++
+	case result.Decision == EventFlag:
+		metric.flag++
+	default:
+		metric.pass++
+	}
+	if result.InputTokens != nil {
+		metric.inputTokens += int64(*result.InputTokens)
+	}
+	if result.OutputTokens != nil {
+		metric.outputTokens += int64(*result.OutputTokens)
+	}
+	if result.ReasoningTokens != nil {
+		metric.reasoningTokens += int64(*result.ReasoningTokens)
+	}
+	metric.latencies, metric.latencyNext = appendLatencySample(metric.latencies, metric.latencyNext, int64(result.LatencyMS))
+}
+
+func (m *AtomicMetrics) ObserveEvaluation(aggregation ModelAggregation, latency time.Duration) {
+	if m == nil {
+		return
+	}
+	m.modelMu.Lock()
+	defer m.modelMu.Unlock()
+	m.evaluation.total++
+	if aggregation.PartialFailure {
+		m.evaluation.partialFailure++
+	}
+	m.evaluation.latencies, m.evaluation.latencyNext = appendLatencySample(
+		m.evaluation.latencies, m.evaluation.latencyNext, latency.Milliseconds(),
+	)
+}
+
+func (m *AtomicMetrics) ModelSnapshot(endpointIDs []string) map[string]EndpointMetricsSnapshot {
+	result := make(map[string]EndpointMetricsSnapshot, len(endpointIDs))
+	if m == nil {
+		return result
+	}
+	m.modelMu.RLock()
+	defer m.modelMu.RUnlock()
+	for _, endpointID := range endpointIDs {
+		metric := m.models[endpointID]
+		if metric == nil {
+			result[endpointID] = EndpointMetricsSnapshot{}
+			continue
+		}
+		samples := append([]int64(nil), metric.latencies...)
+		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+		result[endpointID] = EndpointMetricsSnapshot{
+			Requests: metric.requests, Pass: metric.pass, Flag: metric.flag, Critical: metric.critical,
+			Errors: metric.errors, InputTokens: metric.inputTokens, OutputTokens: metric.outputTokens,
+			ReasoningTokens: metric.reasoningTokens, LatencyP50MS: percentile(samples, .5),
+			LatencyP95MS: percentile(samples, .95),
+		}
+	}
+	return result
+}
+
+func (m *AtomicMetrics) EvaluationSnapshot() EvaluationMetricsSnapshot {
+	if m == nil {
+		return EvaluationMetricsSnapshot{}
+	}
+	m.modelMu.RLock()
+	defer m.modelMu.RUnlock()
+	samples := append([]int64(nil), m.evaluation.latencies...)
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	return EvaluationMetricsSnapshot{
+		Total: m.evaluation.total, PartialFailure: m.evaluation.partialFailure,
+		LatencyP50MS: percentile(samples, .5), LatencyP95MS: percentile(samples, .95),
+	}
+}
+
+func appendLatencySample(samples []int64, next int, latencyMS int64) ([]int64, int) {
+	if latencyMS < 0 {
+		latencyMS = 0
+	}
+	if len(samples) < latencySampleCapacity {
+		return append(samples, latencyMS), next
+	}
+	samples[next] = latencyMS
+	return samples, (next + 1) % latencySampleCapacity
 }

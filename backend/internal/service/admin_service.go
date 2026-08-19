@@ -137,6 +137,16 @@ type AdminService interface {
 	ResetAccountQuota(ctx context.Context, id int64) error
 }
 
+type PromptAuditCounterResetInput struct {
+	UserID    int64
+	Username  string
+	UserEmail string
+}
+
+type PromptAuditCounterResetter interface {
+	ResetDisableCounter(ctx context.Context, input PromptAuditCounterResetInput) error
+}
+
 // CreateUserInput represents input for creating a new user via admin operations.
 type CreateUserInput struct {
 	Email         string
@@ -666,6 +676,7 @@ type adminServiceImpl struct {
 	affiliateService     adminRechargeAffiliateAccruer
 	compositeRouteRepo   CompositeModelRouteRepository
 	compositeResolver    *CompositeRouteResolver
+	promptAuditResetter  PromptAuditCounterResetter
 	// 分组平台变更后用来失效渠道缓存；可为 nil（缓存会在 TTL 到期后自然重建）
 	channelCacheInvalidator ChannelCacheInvalidator
 }
@@ -708,6 +719,7 @@ func NewAdminService(
 	compositeRouteRepo CompositeModelRouteRepository,
 	compositeResolver *CompositeRouteResolver,
 	channelCacheInvalidator ChannelCacheInvalidator,
+	promptAuditResetter PromptAuditCounterResetter,
 ) AdminService {
 	return &adminServiceImpl{
 		userRepo:             userRepo,
@@ -734,6 +746,7 @@ func NewAdminService(
 		affiliateService:     affiliateService,
 		compositeRouteRepo:   compositeRouteRepo,
 		compositeResolver:    compositeResolver,
+		promptAuditResetter:  promptAuditResetter,
 
 		channelCacheInvalidator: channelCacheInvalidator,
 	}

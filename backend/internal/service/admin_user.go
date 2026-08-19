@@ -279,8 +279,33 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 		fields.AllowedGroups = true
 	}
 
-	if err := s.userRepo.Update(ctx, user, fields); err != nil {
+	updateCtx := ctx
+	var userTx *dbent.Tx
+	if oldRole == RoleUser && oldStatus == "disabled" && user.Status == "active" {
+		if s.entClient == nil || s.promptAuditResetter == nil {
+			return nil, errors.New("prompt audit counter reset unavailable")
+		}
+		userTx, err = s.entClient.Tx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = userTx.Rollback() }()
+		updateCtx = dbent.NewTxContext(ctx, userTx)
+		// 统一先锁 Prompt Audit State，再由用户仓储更新 users，避免与自动停用形成反向锁序。
+		if err := s.promptAuditResetter.ResetDisableCounter(updateCtx, PromptAuditCounterResetInput{
+			UserID: user.ID, Username: user.Username, UserEmail: user.Email,
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := s.userRepo.Update(updateCtx, user, fields); err != nil {
 		return nil, err
+	}
+	if userTx != nil {
+		if err := userTx.Commit(); err != nil {
+			return nil, err
+		}
 	}
 
 	// 角色变更属权限敏感操作，落审计日志（含操作者），便于事后追溯。

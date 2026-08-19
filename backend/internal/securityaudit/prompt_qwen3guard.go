@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 type ScannerDefinition struct {
@@ -60,10 +61,12 @@ var categoryAliases = map[string]string{
 
 type GuardError struct {
 	Code       string
+	DetailCode string
 	HTTPStatus int
 	Retryable  bool
 	Timeout    bool
 	Cause      error
+	Attempts   []ModelCallAttempt
 }
 
 func (e *GuardError) Error() string {
@@ -85,63 +88,87 @@ func NormalizeCategory(value string) string {
 	return strings.ReplaceAll(normalized, " ", "_")
 }
 
+var qwenCategoryLabels = []string{
+	"Violent",
+	"Non-violent Illegal Acts",
+	"Sexual Content or Sexual Acts",
+	"PII",
+	"Suicide & Self-Harm",
+	"Unethical Acts",
+	"Politically Sensitive Topics",
+	"Copyright Violation",
+	"Jailbreak",
+}
+
+var qwenCategoryIDs = map[string]string{
+	"Violent":                       "violent",
+	"Non-violent Illegal Acts":      "non_violent_illegal_acts",
+	"Sexual Content or Sexual Acts": "sexual_content_or_sexual_acts",
+	"PII":                           "pii",
+	"Suicide & Self-Harm":           "suicide_and_self_harm",
+	"Unethical Acts":                "unethical_acts",
+	"Politically Sensitive Topics":  "politically_sensitive_topics",
+	"Copyright Violation":           "copyright_violation",
+	"Jailbreak":                     "jailbreak",
+}
+
 func ParseQwen3Guard(content string, enabledScanners []string) (*NormalizedResult, error) {
-	var safety string
-	var categoryLine string
-	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		lower := strings.ToLower(line)
-		switch {
-		case strings.HasPrefix(lower, "safety:"):
-			if safety != "" {
-				return nil, &GuardError{Code: ErrorCodeInvalidResponse}
-			}
-			safety = strings.TrimSpace(line[len("safety:"):])
-		case strings.HasPrefix(lower, "categories:"):
-			if categoryLine != "" {
-				return nil, &GuardError{Code: ErrorCodeInvalidResponse}
-			}
-			categoryLine = strings.TrimSpace(line[len("categories:"):])
-		default:
-			// Auxiliary Guard fields, such as Refusal, do not affect audit decisions.
-		}
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	if strings.Contains(content, "```") || strings.HasPrefix(content, "{") || strings.HasPrefix(content, "[") {
+		return nil, invalidGuardOutput("unexpected_output_wrapper")
 	}
-	switch strings.ToLower(safety) {
-	case "safe":
+	if strings.HasSuffix(content, "\n") {
+		content = strings.TrimSuffix(content, "\n")
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
+		return nil, invalidGuardOutput("invalid_line_count")
+	}
+	safety := ""
+	switch lines[0] {
+	case "Safety: Safe":
 		safety = "Safe"
-	case "controversial":
+	case "Safety: Controversial":
 		safety = "Controversial"
-	case "unsafe":
+	case "Safety: Unsafe":
 		safety = "Unsafe"
 	default:
-		return nil, &GuardError{Code: ErrorCodeInvalidResponse}
+		return nil, invalidGuardOutput("invalid_safety")
 	}
-	if categoryLine == "" {
-		return nil, &GuardError{Code: ErrorCodeInvalidResponse}
+	if !strings.HasPrefix(lines[1], "Categories: ") {
+		return nil, invalidGuardOutput("invalid_categories")
 	}
+	categoryLine := strings.TrimPrefix(lines[1], "Categories: ")
 	enabled := make(map[string]struct{}, len(enabledScanners))
 	for _, scanner := range enabledScanners {
 		enabled[NormalizeCategory(scanner)] = struct{}{}
 	}
-	known := map[string]struct{}{}
-	unknown := map[string]struct{}{}
-	for _, raw := range strings.Split(categoryLine, ",") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" || strings.EqualFold(raw, "none") || strings.EqualFold(raw, "n/a") {
-			continue
+	knownList := make([]string, 0, len(qwenCategoryLabels))
+	if categoryLine != "None" {
+		rawCategories := strings.Split(categoryLine, ", ")
+		if len(rawCategories) == 0 || strings.Join(rawCategories, ", ") != categoryLine {
+			return nil, invalidGuardOutput("invalid_categories")
 		}
-		category := NormalizeCategory(raw)
-		if _, ok := ScannerCatalog[category]; ok {
-			known[category] = struct{}{}
-		} else {
-			unknown[unknownCategoryID(category)] = struct{}{}
+		selected := make(map[string]struct{}, len(rawCategories))
+		for _, raw := range rawCategories {
+			if _, ok := qwenCategoryIDs[raw]; !ok {
+				return nil, invalidGuardOutput("invalid_categories")
+			}
+			if _, exists := selected[raw]; exists {
+				// 保留历史稳定错误码；合法乱序由服务端按固定目录规范化。
+				return nil, invalidGuardOutput("invalid_category_order")
+			}
+			selected[raw] = struct{}{}
+		}
+		for _, label := range qwenCategoryLabels {
+			if _, ok := selected[label]; ok {
+				knownList = append(knownList, qwenCategoryIDs[label])
+			}
 		}
 	}
-	knownList := orderedScannerKeys(known)
-	unknownList := sortedKeys(unknown)
+	if (safety == "Safe") != (categoryLine == "None") {
+		return nil, invalidGuardOutput("invalid_safety_category_pair")
+	}
 	matched := make([]string, 0, len(knownList))
 	for _, category := range knownList {
 		if _, ok := enabled[category]; ok {
@@ -149,10 +176,10 @@ func ParseQwen3Guard(content string, enabledScanners []string) (*NormalizedResul
 		}
 	}
 	result := &NormalizedResult{
-		Safety: safety, Categories: knownList, MatchedScanners: matched, UnknownCategories: unknownList,
+		Safety: safety, Categories: knownList, MatchedScanners: matched, UnknownCategories: []string{},
 		ScannerScores: map[string]float64{}, ScannerEvidence: map[string]string{},
-		ScannerBackend: "qwen3guard-openai", ScannerVersion: "qwen3guard",
-		PolicyID: "priority", PolicyVersion: 1,
+		ScannerBackend: "qwen-two-line", ScannerVersion: PromptContractVersion,
+		PolicyID: StrategyOrderedAll, PolicyVersion: 1,
 		Decision: EventPass, RiskLevel: RiskLow, Action: ActionAllow,
 	}
 	score := 0.0
@@ -162,7 +189,7 @@ func ParseQwen3Guard(content string, enabledScanners []string) (*NormalizedResul
 	}
 	if safety == "Unsafe" {
 		score = 1
-		if len(matched) > 0 || len(unknownList) > 0 || len(knownList) == 0 {
+		if len(matched) > 0 {
 			result.Decision, result.RiskLevel, result.Action = EventCritical, RiskCritical, ActionBlock
 		} else {
 			result.Decision, result.RiskLevel, result.Action = EventFlag, RiskHigh, ActionWarn
@@ -178,9 +205,8 @@ func ParseQwen3Guard(content string, enabledScanners []string) (*NormalizedResul
 	return result, nil
 }
 
-func unknownCategoryID(value string) string {
-	digest := sha256.Sum256([]byte(strings.TrimSpace(strings.ToLower(value))))
-	return fmt.Sprintf("unknown:%x", digest[:8])
+func invalidGuardOutput(detail string) *GuardError {
+	return &GuardError{Code: ErrorCodeInvalidResponse, DetailCode: detail}
 }
 
 func isElevatedControversial(category string) bool {
@@ -193,7 +219,14 @@ type OpenAICompatibleScanner struct {
 
 func NewOpenAICompatibleScanner() *OpenAICompatibleScanner { return &OpenAICompatibleScanner{} }
 
-func (s *OpenAICompatibleScanner) Scan(ctx context.Context, endpoint ActiveEndpoint, chunk string, enabledScanners []string) (*NormalizedResult, error) {
+func (s *OpenAICompatibleScanner) Scan(ctx context.Context, scanRequest ModelScanRequest) (*NormalizedResult, error) {
+	endpoint := scanRequest.Endpoint
+	timeout, err := timeoutDuration(endpoint.TimeoutMS)
+	if err != nil {
+		return nil, &GuardError{Code: ErrorCodeInvalidResponse, DetailCode: "invalid_timeout", Cause: err}
+	}
+	scanCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	client, err := s.clientFor(endpoint)
 	if err != nil {
 		return nil, &GuardError{Code: ErrorCodeUnavailable, Cause: err}
@@ -202,13 +235,85 @@ func (s *OpenAICompatibleScanner) Scan(ctx context.Context, endpoint ActiveEndpo
 	if err != nil {
 		return nil, &GuardError{Code: ErrorCodeUnavailable, Cause: err}
 	}
+	payload, err := buildGuardPayload(scanRequest, "")
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.scanOnce(scanCtx, client, requestURL, endpoint, scanRequest.EnabledScanners, payload, 1, "initial")
+	if err == nil {
+		return result, nil
+	}
+	var guardErr *GuardError
+	if !errors.As(err, &guardErr) || guardErr.Code != ErrorCodeInvalidResponse ||
+		endpoint.Adapter != AdapterOpenAICompatibleQwen ||
+		guardErr.HTTPStatus < http.StatusOK || guardErr.HTTPStatus >= http.StatusMultipleChoices {
+		return nil, err
+	}
+	failedAttempts := append([]ModelCallAttempt(nil), guardErr.Attempts...)
+	attemptKind := "format_repair"
+	repairCode := stableErrorCode(modelErrorCode(err))
+	switch repairCode {
+	case "invalid_response_envelope", "empty_response_content", "invalid_response_content", "response_too_large":
+		attemptKind = "protocol_retry"
+		repairCode = ""
+	}
+	repairPayload, payloadErr := buildGuardPayload(scanRequest, repairCode)
+	if payloadErr != nil {
+		return nil, payloadErr
+	}
+	repaired, repairErr := s.scanOnce(scanCtx, client, requestURL, endpoint, scanRequest.EnabledScanners, repairPayload, 2, attemptKind)
+	if repairErr == nil {
+		repaired.FailedAttempts = failedAttempts
+		addAttemptUsage(repaired, failedAttempts)
+		return repaired, nil
+	}
+	var repairGuardErr *GuardError
+	if errors.As(repairErr, &repairGuardErr) {
+		repairGuardErr.Attempts = append(failedAttempts, repairGuardErr.Attempts...)
+	}
+	return nil, repairErr
+}
+
+func buildGuardPayload(scanRequest ModelScanRequest, repairCode string) (map[string]any, error) {
+	endpoint := scanRequest.Endpoint
 	payload := map[string]any{
 		"model":       endpoint.Model,
-		"messages":    []map[string]string{{"role": "user", "content": chunk}},
+		"messages":    []map[string]string{{"role": "user", "content": scanRequest.FullPrompt}},
 		"temperature": 0,
-		"max_tokens":  64,
-		"seed":        42,
+		"stream":      false,
 	}
+	switch endpoint.Adapter {
+	case AdapterQwen3Guard:
+		payload["seed"] = 42
+	case AdapterOpenAICompatibleQwen:
+		if strings.TrimSpace(scanRequest.AuditPrompt) == "" {
+			return nil, &GuardError{Code: ErrorCodeUnavailable, DetailCode: "audit_prompt_required"}
+		}
+		systemPrompt := scanRequest.AuditPrompt
+		if repairCode != "" {
+			systemPrompt += "\n\n" + fmt.Sprintf(FormatRepairPrompt, repairCode)
+		}
+		systemPrompt += "\n\n" + FixedOutputPrompt
+		payload["messages"] = []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": scanRequest.FullPrompt},
+		}
+	default:
+		return nil, &GuardError{Code: ErrorCodeUnavailable, DetailCode: "invalid_adapter"}
+	}
+	return payload, nil
+}
+
+func (s *OpenAICompatibleScanner) scanOnce(
+	ctx context.Context,
+	client *http.Client,
+	requestURL string,
+	endpoint ActiveEndpoint,
+	enabledScanners []string,
+	payload map[string]any,
+	callAttempt int,
+	attemptKind string,
+) (*NormalizedResult, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, &GuardError{Code: ErrorCodeInvalidResponse, Cause: err}
@@ -221,6 +326,7 @@ func (s *OpenAICompatibleScanner) Scan(ctx context.Context, endpoint ActiveEndpo
 	if endpoint.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+endpoint.Token)
 	}
+	started := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		timeout := errors.Is(err, context.DeadlineExceeded)
@@ -228,32 +334,149 @@ func (s *OpenAICompatibleScanner) Scan(ctx context.Context, endpoint ActiveEndpo
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			timeout = true
 		}
-		return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Timeout: timeout, Cause: err}
+		guardErr := &GuardError{
+			Code: ErrorCodeUnavailable, DetailCode: "model_request_failed",
+			Retryable: true, Timeout: timeout, Cause: err,
+		}
+		if timeout {
+			guardErr.DetailCode = "model_timeout"
+		}
+		guardErr.Attempts = []ModelCallAttempt{failedModelCallAttempt(
+			endpoint, callAttempt, attemptKind, 0, time.Since(started), modelUsage{}, guardErr, nil, false,
+		)}
+		return nil, guardErr
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		return nil, &GuardError{Code: ErrorCodeUnavailable, HTTPStatus: resp.StatusCode, Retryable: retryable}
-	}
 	limited := io.LimitReader(resp.Body, maxGuardResponseBytes+1)
 	responseBody, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Cause: err}
+		guardErr := &GuardError{
+			Code: ErrorCodeUnavailable, DetailCode: "response_read_failed",
+			HTTPStatus: resp.StatusCode, Retryable: true, Cause: err,
+		}
+		guardErr.Attempts = []ModelCallAttempt{failedModelCallAttempt(
+			endpoint, callAttempt, attemptKind, resp.StatusCode, time.Since(started), modelUsage{}, guardErr, responseBody, false,
+		)}
+		return nil, guardErr
 	}
-	if int64(len(responseBody)) > maxGuardResponseBytes {
-		return nil, &GuardError{Code: ErrorCodeInvalidResponse}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		guardErr := &GuardError{
+			Code: ErrorCodeUnavailable, DetailCode: "http_status_error", HTTPStatus: resp.StatusCode,
+			Retryable: resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
+		}
+		guardErr.Attempts = []ModelCallAttempt{failedModelCallAttempt(
+			endpoint, callAttempt, attemptKind, resp.StatusCode, time.Since(started), modelUsage{}, guardErr, responseBody,
+			int64(len(responseBody)) > maxGuardResponseBytes,
+		)}
+		return nil, guardErr
 	}
-	content, err := extractOpenAIContent(responseBody)
+	truncated := int64(len(responseBody)) > maxGuardResponseBytes
+	if truncated {
+		guardErr := &GuardError{
+			Code: ErrorCodeInvalidResponse, DetailCode: "response_too_large", HTTPStatus: resp.StatusCode,
+		}
+		guardErr.Attempts = []ModelCallAttempt{failedModelCallAttempt(
+			endpoint, callAttempt, attemptKind, resp.StatusCode, time.Since(started), modelUsage{}, guardErr, responseBody, true,
+		)}
+		return nil, guardErr
+	}
+	content, usage, err := extractOpenAIResponse(responseBody)
 	if err != nil {
-		return nil, &GuardError{Code: ErrorCodeInvalidResponse, Cause: err}
+		guardErr := &GuardError{
+			Code: ErrorCodeInvalidResponse, DetailCode: guardResponseErrorCode(err),
+			HTTPStatus: resp.StatusCode, Cause: err,
+		}
+		guardErr.Attempts = []ModelCallAttempt{failedModelCallAttempt(
+			endpoint, callAttempt, attemptKind, resp.StatusCode, time.Since(started), usage, guardErr, responseBody, false,
+		)}
+		return nil, guardErr
 	}
 	result, err := ParseQwen3Guard(content, enabledScanners)
 	if err != nil {
+		var guardErr *GuardError
+		if errors.As(err, &guardErr) {
+			guardErr.HTTPStatus = resp.StatusCode
+			guardErr.Attempts = []ModelCallAttempt{failedModelCallAttempt(
+				endpoint, callAttempt, attemptKind, resp.StatusCode, time.Since(started), usage, guardErr, responseBody, false,
+			)}
+		}
 		return nil, err
 	}
 	result.GuardEndpointID = endpoint.ID
 	result.ScannerVersion = endpoint.Model
+	result.InputTokens = usage.InputTokens
+	result.OutputTokens = usage.OutputTokens
+	result.ReasoningTokens = usage.ReasoningTokens
 	return result, nil
+}
+
+func failedModelCallAttempt(
+	endpoint ActiveEndpoint,
+	callAttempt int,
+	attemptKind string,
+	httpStatus int,
+	latency time.Duration,
+	usage modelUsage,
+	guardErr *GuardError,
+	responseBody []byte,
+	truncated bool,
+) ModelCallAttempt {
+	captured := responseBody
+	if int64(len(captured)) > maxGuardResponseBytes {
+		captured = captured[:maxGuardResponseBytes]
+	}
+	body := strings.ReplaceAll(strings.ToValidUTF8(string(captured), "\uFFFD"), "\x00", "")
+	responseHash := ""
+	if len(captured) > 0 {
+		digest := sha256.Sum256(captured)
+		responseHash = fmt.Sprintf("%x", digest[:])
+	}
+	errorCode := ErrorCodeUnavailable
+	retryable := false
+	if guardErr != nil {
+		errorCode = stableErrorCode(modelErrorCode(guardErr))
+		retryable = guardErr.Retryable
+	}
+	return ModelCallAttempt{
+		CallAttempt: callAttempt, AttemptKind: attemptKind,
+		EndpointID: endpoint.ID, Adapter: endpoint.Adapter, Model: endpoint.Model,
+		HTTPStatus: httpStatus, LatencyMS: int(latency.Milliseconds()),
+		InputTokens: validTokenCount(usage.InputTokens), OutputTokens: validTokenCount(usage.OutputTokens),
+		ReasoningTokens: validTokenCount(usage.ReasoningTokens),
+		ErrorCode:       errorCode, Retryable: retryable,
+		ResponseBody: body, ResponseSHA256: responseHash, ResponseBytes: len(responseBody),
+		ResponseTruncated: truncated,
+	}
+}
+
+func validTokenCount(value *int) *int {
+	if value == nil || *value < 0 {
+		return nil
+	}
+	result := *value
+	return &result
+}
+
+func addAttemptUsage(result *NormalizedResult, attempts []ModelCallAttempt) {
+	if result == nil {
+		return
+	}
+	for _, attempt := range attempts {
+		result.InputTokens = addTokenCount(result.InputTokens, attempt.InputTokens)
+		result.OutputTokens = addTokenCount(result.OutputTokens, attempt.OutputTokens)
+		result.ReasoningTokens = addTokenCount(result.ReasoningTokens, attempt.ReasoningTokens)
+	}
+}
+
+func addTokenCount(current, additional *int) *int {
+	if additional == nil {
+		return current
+	}
+	total := *additional
+	if current != nil {
+		total += *current
+	}
+	return &total
 }
 
 func (s *OpenAICompatibleScanner) clientFor(endpoint ActiveEndpoint) (*http.Client, error) {
@@ -279,24 +502,47 @@ func (s *OpenAICompatibleScanner) clientFor(endpoint ActiveEndpoint) (*http.Clie
 	return actualClient, nil
 }
 
-func extractOpenAIContent(body []byte) (string, error) {
+type modelUsage struct {
+	InputTokens     *int
+	OutputTokens    *int
+	ReasoningTokens *int
+}
+
+type guardResponseError struct {
+	code string
+}
+
+func (e *guardResponseError) Error() string { return e.code }
+
+func extractOpenAIResponse(body []byte) (string, modelUsage, error) {
 	var response struct {
 		Choices []struct {
 			Message struct {
 				Content any `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens      *int `json:"prompt_tokens"`
+			CompletionTokens  *int `json:"completion_tokens"`
+			CompletionDetails struct {
+				ReasoningTokens *int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil || len(response.Choices) == 0 {
-		return "", errors.New("prompt guard response envelope invalid")
+		return "", modelUsage{}, &guardResponseError{code: "invalid_response_envelope"}
+	}
+	usage := modelUsage{
+		InputTokens: response.Usage.PromptTokens, OutputTokens: response.Usage.CompletionTokens,
+		ReasoningTokens: response.Usage.CompletionDetails.ReasoningTokens,
 	}
 	content := response.Choices[0].Message.Content
 	switch typed := content.(type) {
 	case string:
-		if strings.TrimSpace(typed) == "" {
-			return "", errors.New("prompt guard response content empty")
+		if typed == "" {
+			return "", usage, &guardResponseError{code: "empty_response_content"}
 		}
-		return typed, nil
+		return typed, usage, nil
 	case []any:
 		parts := make([]string, 0, len(typed))
 		for _, item := range typed {
@@ -309,12 +555,25 @@ func extractOpenAIContent(body []byte) (string, error) {
 			}
 		}
 		if len(parts) == 0 {
-			return "", errors.New("prompt guard response content empty")
+			return "", usage, &guardResponseError{code: "empty_response_content"}
 		}
-		return strings.Join(parts, "\n"), nil
+		return strings.Join(parts, "\n"), usage, nil
 	default:
-		return "", errors.New("prompt guard response content invalid")
+		return "", usage, &guardResponseError{code: "invalid_response_content"}
 	}
+}
+
+func guardResponseErrorCode(err error) string {
+	var responseErr *guardResponseError
+	if errors.As(err, &responseErr) && responseErr.code != "" {
+		return responseErr.code
+	}
+	return ErrorCodeInvalidResponse
+}
+
+func extractOpenAIContent(body []byte) (string, error) {
+	content, _, err := extractOpenAIResponse(body)
+	return content, err
 }
 
 func ScannerDefinitions() []ScannerDefinition {

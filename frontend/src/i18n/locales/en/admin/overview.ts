@@ -568,7 +568,7 @@ export default {
       userCreated: 'User created successfully',
       userUpdated: 'User updated successfully',
       userDeleted: 'User deleted successfully',
-      userEnabled: 'User enabled successfully',
+      userEnabled: 'User enabled; the Prompt Audit auto-disable counter was reset',
       userDisabled: 'User disabled successfully',
       failedToLoad: 'Failed to load users',
       failedToCreate: 'Failed to create user',

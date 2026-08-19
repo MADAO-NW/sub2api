@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	appservice "github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 type GuardEvaluator struct {
@@ -12,6 +14,7 @@ type GuardEvaluator struct {
 	repo    JobRepository
 	metrics Metrics
 	clock   Clock
+	cache   appservice.APIKeyAuthCacheInvalidator
 
 	global       chan struct{}
 	perNodeLimit int
@@ -19,8 +22,17 @@ type GuardEvaluator struct {
 	nodes        map[string]chan struct{}
 }
 
-func NewGuardEvaluator(scanner PromptScanner, repo JobRepository, metrics Metrics) *GuardEvaluator {
-	return newGuardEvaluator(scanner, repo, metrics, 64, 16)
+func NewGuardEvaluator(
+	scanner PromptScanner,
+	repo JobRepository,
+	metrics Metrics,
+	cache ...appservice.APIKeyAuthCacheInvalidator,
+) *GuardEvaluator {
+	evaluator := newGuardEvaluator(scanner, repo, metrics, 64, 16)
+	if len(cache) > 0 {
+		evaluator.cache = cache[0]
+	}
+	return evaluator
 }
 
 func newGuardEvaluator(scanner PromptScanner, repo JobRepository, metrics Metrics, globalLimit, perNodeLimit int) *GuardEvaluator {
@@ -64,72 +76,45 @@ func (g *GuardEvaluator) Evaluate(ctx context.Context, cfg ActiveConfig, snapsho
 		logGuardFailure(snapshot, cfg, DecisionUnavailable, ErrorCodeUnavailable, "", g.clock.Now().Sub(start))
 		return nil, &GuardError{Code: ErrorCodeUnavailable}
 	}
-	timeout := time.Duration(endpoints[0].TimeoutMS) * time.Millisecond
-	if timeout <= 0 {
-		timeout = DefaultTimeoutMS * time.Millisecond
-	}
-	evalCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	inputLimit := minimumInputLimit(endpoints)
-	chunks := SplitRunes(snapshot.ScanText, inputLimit)
-	if len(chunks) == 0 {
+	if snapshot.ScanText == "" {
 		if g.metrics != nil {
 			g.metrics.Observe(DecisionAllow, g.clock.Now().Sub(start))
 		}
 		return &PromptDecision{Kind: DecisionAllow, AllowNextStage: true}, nil
 	}
-	LogInfo(EventEvaluationStarted, mergeLogFields(baseFields, map[string]any{"chunk_total": len(chunks), "status": "started"}))
-	results := make([]*NormalizedResult, 0, len(chunks))
-	for index, chunk := range chunks {
-		chunkStarted := g.clock.Now()
-		LogInfo(EventChunkStarted, mergeLogFields(baseFields, map[string]any{
-			"chunk_index": index + 1, "chunk_total": len(chunks),
-			"chunk_chars": len([]rune(chunk)), "input_chars": snapshot.PromptLength, "input_limit": inputLimit,
-			"status": "started",
-		}))
-		result, err := g.scanChunk(evalCtx, cfg, endpoints, chunk)
-		if err != nil {
-			code := guardErrorCode(err)
-			LogWarn(EventChunkFailed, mergeLogFields(baseFields, map[string]any{
-				"chunk_index": index + 1, "chunk_total": len(chunks),
-				"chunk_chars": len([]rune(chunk)), "input_chars": snapshot.PromptLength, "input_limit": inputLimit,
-				"latency_ms": g.clock.Now().Sub(chunkStarted).Milliseconds(), "error_code": code, "status": "failed",
-			}))
-			kind := DecisionUnavailable
-			if code == ErrorCodeInvalidResponse {
-				kind = DecisionInvalid
-			}
-			if g.metrics != nil {
-				g.metrics.Observe(kind, g.clock.Now().Sub(start))
-				var guardErr *GuardError
-				if errors.As(err, &guardErr) && guardErr.Timeout {
-					g.metrics.IncTimeout()
-				}
-			}
-			logGuardFailure(snapshot, cfg, kind, code, "", g.clock.Now().Sub(start))
-			return nil, err
-		}
-		result.ChunkTotal = len(chunks)
-		results = append(results, result)
-		LogInfo(EventChunkCompleted, mergeLogFields(baseFields, map[string]any{
-			"chunk_index": index + 1, "chunk_total": len(chunks),
-			"chunk_chars": len([]rune(chunk)), "input_chars": snapshot.PromptLength, "input_limit": inputLimit,
-			"guard_endpoint_id": result.GuardEndpointID, "action": result.Action,
-			"latency_ms": g.clock.Now().Sub(chunkStarted).Milliseconds(), "status": "completed",
-		}))
-		if result.Action == ActionBlock {
-			break
-		}
-	}
-	aggregated, err := AggregateResults(results, g.clock.Now().Sub(start))
+	LogInfo(EventEvaluationStarted, mergeLogFields(baseFields, map[string]any{
+		"enabled_model_count": len(endpoints),
+		"block_threshold":     CalculateBlockThreshold(cfg.AggregationStrategy, len(endpoints)),
+		"status":              "started",
+	}))
+	aggregated, err := runOrderedModels(ctx, cfg, snapshot.ScanText, g.clock, g.metrics, nil, g.scanModel)
 	if err != nil {
-		if g.metrics != nil {
-			g.metrics.Observe(DecisionInvalid, g.clock.Now().Sub(start))
+		kind := DecisionUnavailable
+		if guardErrorCode(err) == ErrorCodeInvalidResponse {
+			kind = DecisionInvalid
 		}
-		logGuardFailure(snapshot, cfg, DecisionInvalid, ErrorCodeInvalidResponse, "", g.clock.Now().Sub(start))
-		return nil, &GuardError{Code: ErrorCodeInvalidResponse, Cause: err}
+		if g.metrics != nil {
+			g.metrics.Observe(kind, g.clock.Now().Sub(start))
+			var guardErr *GuardError
+			if errors.As(err, &guardErr) && guardErr.Timeout {
+				g.metrics.IncTimeout()
+			}
+		}
+		logGuardFailure(snapshot, cfg, kind, guardErrorCode(err), "", g.clock.Now().Sub(start))
+		if g.repo != nil {
+			if recordErr := g.repo.RecordBlockingFailure(
+				ctx, snapshot.Redacted(), cfg, modelErrorCode(err), modelAttemptsFromError(err),
+			); recordErr != nil {
+				if g.metrics != nil {
+					g.metrics.IncRecordFailed()
+				}
+				LogWarn(EventResultRecordFailed, mergeLogFields(baseFields, map[string]any{
+					"error_code": "result_record_failed", "stage": snapshot.Stage, "status": "failed",
+				}))
+			}
+		}
+		return nil, err
 	}
-	aggregated.ChunkTotal = len(chunks)
 	kind := DecisionAllow
 	if aggregated.Action == ActionWarn {
 		kind = DecisionFlag
@@ -141,17 +126,18 @@ func (g *GuardEvaluator) Evaluate(ctx context.Context, cfg ActiveConfig, snapsho
 	if kind == DecisionBlock {
 		decision.ErrorCode = ErrorCodeBlocked
 	}
-	if g.metrics != nil {
-		g.metrics.Observe(kind, g.clock.Now().Sub(start))
-	}
 	LogInfo(EventChunksAggregated, mergeLogFields(baseFields, map[string]any{
 		"decision":   kind,
-		"risk_level": aggregated.RiskLevel, "action": aggregated.Action, "chunk_total": aggregated.ChunkTotal,
-		"latency_ms": aggregated.LatencyMS, "guard_endpoint_id": aggregated.GuardEndpointID, "stage": snapshot.Stage,
+		"risk_level": aggregated.RiskLevel, "action": aggregated.Action,
+		"enabled_model_count": aggregated.ModelResults.Aggregation.EnabledModelCount,
+		"block_threshold":     aggregated.ModelResults.Aggregation.BlockThreshold,
+		"partial_failure":     aggregated.ModelResults.Aggregation.PartialFailure,
+		"latency_ms":          aggregated.LatencyMS, "guard_endpoint_id": aggregated.GuardEndpointID, "stage": snapshot.Stage,
 		"status": "completed",
 	}))
 	if g.repo != nil {
-		if _, recordErr := g.repo.RecordBlocking(ctx, snapshot.Redacted(), cfg.ConfigVersion, aggregated, cfg.StorePassEvents); recordErr != nil {
+		completion, recordErr := g.repo.RecordBlocking(ctx, snapshot.Redacted(), cfg, aggregated)
+		if recordErr != nil {
 			if g.metrics != nil {
 				g.metrics.IncRecordFailed()
 			}
@@ -159,7 +145,27 @@ func (g *GuardEvaluator) Evaluate(ctx context.Context, cfg ActiveConfig, snapsho
 				"decision": kind, "error_code": "result_record_failed", "stage": snapshot.Stage,
 				"status": "failed",
 			}))
+		} else if completion != nil && completion.DisabledUserID > 0 && g.cache != nil {
+			g.cache.InvalidateAuthCacheByUserID(ctx, completion.DisabledUserID)
 		}
+	}
+	if aggregated.ModelResults.Aggregation.PartialFailure && kind != DecisionBlock {
+		err := partialFailureError(aggregated.ModelResults)
+		if g.metrics != nil {
+			failureKind := DecisionUnavailable
+			if guardErrorCode(err) == ErrorCodeInvalidResponse {
+				failureKind = DecisionInvalid
+			}
+			g.metrics.Observe(failureKind, g.clock.Now().Sub(start))
+			if modelResultsHaveError(aggregated.ModelResults, "model_timeout") {
+				g.metrics.IncTimeout()
+			}
+		}
+		logGuardFailure(snapshot, cfg, DecisionUnavailable, guardErrorCode(err), aggregated.GuardEndpointID, g.clock.Now().Sub(start))
+		return nil, err
+	}
+	if g.metrics != nil {
+		g.metrics.Observe(kind, g.clock.Now().Sub(start))
 	}
 	if kind == DecisionBlock {
 		LogWarn(EventGuardBlocked, mergeLogFields(baseFields, map[string]any{
@@ -187,55 +193,33 @@ func logGuardFailure(snapshot PromptSnapshot, cfg ActiveConfig, kind DecisionKin
 	}))
 }
 
-func (g *GuardEvaluator) scanChunk(ctx context.Context, cfg ActiveConfig, endpoints []ActiveEndpoint, chunk string) (*NormalizedResult, error) {
-	var lastErr error
-	for index, endpoint := range endpoints {
-		semaphore := g.nodeSemaphore(endpoint.ID)
-		select {
-		case semaphore <- struct{}{}:
-		case <-ctx.Done():
-			return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Timeout: errors.Is(ctx.Err(), context.DeadlineExceeded), Cause: ctx.Err()}
-		default:
-			if g.metrics != nil {
-				g.metrics.IncBulkheadFull()
-			}
-			lastErr = &GuardError{Code: ErrorCodeUnavailable, Retryable: true}
-			if index < len(endpoints)-1 && g.metrics != nil {
-				g.metrics.IncFailover()
-			}
-			continue
+func (g *GuardEvaluator) scanModel(ctx context.Context, request ModelScanRequest) (*NormalizedResult, error) {
+	semaphore := g.nodeSemaphore(request.Endpoint.ID)
+	select {
+	case semaphore <- struct{}{}:
+		defer func() { <-semaphore }()
+	case <-ctx.Done():
+		return nil, &GuardError{
+			Code: ErrorCodeUnavailable, DetailCode: "model_timeout", Retryable: true,
+			Timeout: errors.Is(ctx.Err(), context.DeadlineExceeded), Cause: ctx.Err(),
 		}
-		result, err := callPromptScanner(ctx, g.scanner, endpoint, chunk, cfg.Scanners)
-		<-semaphore
-		if err == nil && result != nil {
-			return result, nil
+	default:
+		if g.metrics != nil {
+			g.metrics.IncBulkheadFull()
 		}
-		if err == nil {
-			err = &GuardError{Code: ErrorCodeInvalidResponse, Retryable: false}
-		}
-		lastErr = err
-		var guardErr *GuardError
-		if !errors.As(err, &guardErr) || !guardErr.Retryable {
-			return nil, err
-		}
-		if index < len(endpoints)-1 && g.metrics != nil {
-			g.metrics.IncFailover()
-		}
+		return nil, &GuardError{Code: ErrorCodeUnavailable, DetailCode: "model_bulkhead_full", Retryable: true}
 	}
-	if lastErr == nil {
-		lastErr = &GuardError{Code: ErrorCodeUnavailable}
-	}
-	return nil, lastErr
+	return callPromptScanner(ctx, g.scanner, request)
 }
 
-func callPromptScanner(ctx context.Context, scanner PromptScanner, endpoint ActiveEndpoint, chunk string, scanners []string) (result *NormalizedResult, err error) {
+func callPromptScanner(ctx context.Context, scanner PromptScanner, request ModelScanRequest) (result *NormalizedResult, err error) {
 	defer func() {
 		if recover() != nil {
 			result = nil
 			err = &GuardError{Code: ErrorCodeUnavailable, Retryable: false}
 		}
 	}()
-	return scanner.Scan(ctx, endpoint, chunk, scanners)
+	return scanner.Scan(ctx, request)
 }
 
 func (g *GuardEvaluator) nodeSemaphore(id string) chan struct{} {
@@ -249,26 +233,35 @@ func (g *GuardEvaluator) nodeSemaphore(id string) chan struct{} {
 	return semaphore
 }
 
-func minimumInputLimit(endpoints []ActiveEndpoint) int {
-	limit := DefaultInputLimit
-	for index, endpoint := range endpoints {
-		value := endpoint.InputLimit
-		if value <= 0 {
-			value = DefaultInputLimit
-		}
-		if index == 0 || value < limit {
-			limit = value
-		}
-	}
-	return limit
-}
-
 func guardErrorCode(err error) string {
 	var guardErr *GuardError
 	if errors.As(err, &guardErr) && guardErr.Code != "" {
 		return guardErr.Code
 	}
 	return ErrorCodeUnavailable
+}
+
+func partialFailureError(results ModelResults) error {
+	code := ErrorCodeUnavailable
+	for _, model := range results.Models {
+		if model.ErrorCode == ErrorCodeInvalidResponse ||
+			model.ErrorCode == "invalid_line_count" || model.ErrorCode == "invalid_safety" ||
+			model.ErrorCode == "invalid_categories" || model.ErrorCode == "invalid_category_order" ||
+			model.ErrorCode == "invalid_safety_category_pair" || model.ErrorCode == "unexpected_output_wrapper" {
+			code = ErrorCodeInvalidResponse
+			break
+		}
+	}
+	return &GuardError{Code: code, DetailCode: "partial_model_failure", Retryable: code == ErrorCodeUnavailable}
+}
+
+func modelResultsHaveError(results ModelResults, code string) bool {
+	for _, model := range results.Models {
+		if model.ErrorCode == code {
+			return true
+		}
+	}
+	return false
 }
 
 func pointerLogID(value *int64) int64 {

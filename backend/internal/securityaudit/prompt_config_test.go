@@ -37,20 +37,106 @@ func TestDefaultConfigIsOff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ModeOff, active.EffectiveMode())
 	require.Equal(t, AllScannerIDs, storage.Scanners)
+	require.Equal(t, DefaultAuditPrompt, storage.AuditPrompt)
+	explicitEmpty, err := ParseStorageConfig(`{"audit_prompt":""}`)
+	require.NoError(t, err)
+	require.Empty(t, explicitEmpty.AuditPrompt)
 	publicJSON, err := json.Marshal(PublicFromStorage(storage, true, nil))
 	require.NoError(t, err)
 	require.Contains(t, string(publicJSON), `"group_ids":[]`)
 	require.Contains(t, string(publicJSON), `"endpoints":[]`)
+	require.Equal(t, PromptContractVersion, PublicFromStorage(storage, true, nil).PromptContract.Version)
+	storageJSON, err := json.Marshal(storage)
+	require.NoError(t, err)
+	require.NotContains(t, string(storageJSON), "prompt_contract")
+	require.NotContains(t, string(storageJSON), "fixed_output_prompt")
+}
+
+func TestDefaultAuditPromptKeepsRiskBoundariesInBusinessPolicy(t *testing.T) {
+	policyMarker := "本策略在降低误杀的同时审核以下业务范围："
+	policyIndex := strings.Index(DefaultAuditPrompt, policyMarker)
+	require.NotEqual(t, -1, policyIndex)
+	policyPrompt := DefaultAuditPrompt[policyIndex:]
+	for _, expected := range []string{
+		"成人色情、露骨性行为、性胁迫",
+		"枪械、武器、爆炸物的制造、改装、性能优化或关键工程参数",
+		"非法或受控药物、麻醉性物质及毒物的可执行合成",
+	} {
+		require.Contains(t, policyPrompt, expected)
+	}
+	require.NotContains(t, DefaultAuditPrompt[:policyIndex], "成人色情、武器、毒品")
+	require.Contains(t, FixedOutputPrompt, "不得用安全拒绝代替标签")
+	require.NotContains(t, DefaultAuditPrompt, "普通成人内容、自杀与自残话题")
+}
+
+func TestConfigPreservesEndpointOrderAndServerManagesEmailRuleRevision(t *testing.T) {
+	manager := &ConfigManager{encryptor: prefixEncryptor{}, encryptionKeyConfigured: true}
+	request := promptAuditUpdateRequest(1, 1, "")
+	request.Notifications.AdminEmail = "security@example.test"
+	request.Enforcement.EmailWarning = EmailWarningUpdate{
+		Enabled: true, LookbackCount: 20, ViolationThreshold: 3,
+	}
+	request.Endpoints = []UpdateEndpoint{
+		{ID: "second", Name: "Second", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8082", TimeoutMS: 1000, Enabled: true},
+		{ID: "first", Name: "First", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8081", TimeoutMS: 1000, Enabled: true},
+	}
+
+	first, err := manager.buildNextStorage(DefaultStorageConfig(), request, 9)
+	require.NoError(t, err)
+	require.Equal(t, []string{"second", "first"}, []string{first.Endpoints[0].ID, first.Endpoints[1].ID})
+	require.Equal(t, int64(2), first.Enforcement.EmailWarning.RuleRevision)
+
+	request.WorkerCount = 2
+	second, err := manager.buildNextStorage(first, request, 9)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), second.Enforcement.EmailWarning.RuleRevision)
+
+	request.Enforcement.EmailWarning.ViolationThreshold = 4
+	third, err := manager.buildNextStorage(second, request, 9)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), third.Enforcement.EmailWarning.RuleRevision)
+}
+
+func TestConfigRequiresThirdPartyPromptAndValidEnforcement(t *testing.T) {
+	manager := &ConfigManager{encryptor: prefixEncryptor{}, encryptionKeyConfigured: true}
+	base := promptAuditUpdateRequest(1, 1, "")
+	qwenOnly, err := manager.buildNextStorage(DefaultStorageConfig(), base, 1)
+	require.NoError(t, err)
+	require.Empty(t, qwenOnly.AuditPrompt)
+
+	base.Endpoints[0].Adapter = AdapterOpenAICompatibleQwen
+
+	_, err = manager.buildNextStorage(DefaultStorageConfig(), base, 1)
+	require.Equal(t, "prompt_audit_audit_prompt_required", infraerrors.Reason(err))
+
+	base.AuditPrompt = "admin policy"
+	base.Notifications.AdminEmail = "security@example.test"
+	base.Enforcement.EmailWarning = EmailWarningUpdate{
+		Enabled: true, LookbackCount: 2, ViolationThreshold: 3,
+	}
+	_, err = manager.buildNextStorage(DefaultStorageConfig(), base, 1)
+	require.Equal(t, "prompt_audit_invalid_email_warning_rule", infraerrors.Reason(err))
+
+	base.Enforcement.EmailWarning = EmailWarningUpdate{}
+	base.Enforcement.AccountDisable = AccountDisableConfig{Enabled: true, ViolationThreshold: 0}
+	_, err = manager.buildNextStorage(DefaultStorageConfig(), base, 1)
+	require.Equal(t, "prompt_audit_invalid_account_disable_rule", infraerrors.Reason(err))
+
+	base.Enforcement.AccountDisable.ViolationThreshold = 5
+	base.Notifications.AdminEmail = ""
+	_, err = manager.buildNextStorage(DefaultStorageConfig(), base, 1)
+	require.Equal(t, "prompt_audit_invalid_admin_email", infraerrors.Reason(err))
 }
 
 func TestBlockingLatestTurnOnlyConfigRoundTrip(t *testing.T) {
 	manager := &ConfigManager{encryptor: prefixEncryptor{}, encryptionKeyConfigured: true}
 	request := UpdateConfigRequest{
 		ExpectedConfigVersion: 1, Enabled: true, BlockingEnabled: true, BlockingLatestTurnOnly: true,
-		Strategy: "priority", WorkerCount: 1, QueueCapacity: 10, Scanners: []string{"pii"}, AllGroups: true,
+		Strategy: StrategyOrderedAll, AggregationStrategy: AggregationAnyBlock,
+		WorkerCount: 1, QueueCapacity: 10, Scanners: []string{"pii"}, AllGroups: true,
 		Endpoints: []UpdateEndpoint{{
-			ID: "guard-1", Name: "Guard", Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080",
-			Model: DefaultGuardModel, TimeoutMS: 1000, InputLimit: 1000, Enabled: true,
+			ID: "guard-1", Name: "Guard", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible",
+			BaseURL: "http://127.0.0.1:8080", Model: DefaultGuardModel, TimeoutMS: 1000, Enabled: true,
 		}},
 	}
 	next, err := manager.buildNextStorage(DefaultStorageConfig(), request, 9)
@@ -73,7 +159,7 @@ func TestConfigRejectsBlockingWithoutAudit(t *testing.T) {
 
 func TestPublicConfigNeverMarshalsToken(t *testing.T) {
 	storage := DefaultStorageConfig()
-	storage.Endpoints = []StorageEndpoint{{ID: "one", Name: "One", Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", Model: DefaultGuardModel, TokenCiphertext: "GUARD_TOKEN_CANARY_SECRET", TimeoutMS: 1000, InputLimit: 1000, Enabled: true}}
+	storage.Endpoints = []StorageEndpoint{{ID: "one", Name: "One", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", Model: DefaultGuardModel, TokenCiphertext: "GUARD_TOKEN_CANARY_SECRET", TimeoutMS: 1000, Enabled: true}}
 	public := PublicFromStorage(storage, true, nil)
 	raw, err := json.Marshal(public)
 	require.NoError(t, err)
@@ -151,7 +237,7 @@ func TestConfigManagerPublicRequiresSuccessfullyLoadedSnapshot(t *testing.T) {
 // default v1 config that makes every save fail the CAS version check.
 func TestConfigManagerUndecryptableTokenKeepsConfigVisibleAndRecoverable(t *testing.T) {
 	const canary = "persisted-token-canary"
-	persisted := `{"enabled":true,"blocking_enabled":false,"config_version":9,"endpoints":[{"id":"g1","name":"Guard","protocol":"openai_compatible","base_url":"http://127.0.0.1:8080","model":"m","token_ciphertext":"` + canary + `","timeout_ms":1000,"input_limit":1000,"enabled":true}]}`
+	persisted := `{"enabled":true,"blocking_enabled":false,"config_version":9,"endpoints":[{"id":"g1","name":"Guard","adapter":"qwen3guard","protocol":"openai_compatible","base_url":"http://127.0.0.1:8080","model":"m","token_ciphertext":"` + canary + `","timeout_ms":1000,"enabled":true}]}`
 	manager := NewConfigManager(nil, staticSettingRepository{values: map[string]string{
 		SettingKeyPromptAuditConfig: persisted,
 		SettingKeyRiskControl:       "true",
@@ -183,7 +269,7 @@ func TestConfigManagerUndecryptableTokenKeepsConfigVisibleAndRecoverable(t *test
 }
 
 func TestConfigManagerUndecryptableTokenStillFailsClosedForBlockingIntent(t *testing.T) {
-	persisted := `{"enabled":true,"blocking_enabled":true,"config_version":9,"endpoints":[{"id":"g1","name":"Guard","protocol":"openai_compatible","base_url":"http://127.0.0.1:8080","model":"m","token_ciphertext":"undecryptable","timeout_ms":1000,"input_limit":1000,"enabled":true}]}`
+	persisted := `{"enabled":true,"blocking_enabled":true,"config_version":9,"endpoints":[{"id":"g1","name":"Guard","adapter":"qwen3guard","protocol":"openai_compatible","base_url":"http://127.0.0.1:8080","model":"m","token_ciphertext":"undecryptable","timeout_ms":1000,"enabled":true}]}`
 	manager := NewConfigManager(nil, staticSettingRepository{values: map[string]string{
 		SettingKeyPromptAuditConfig: persisted,
 		SettingKeyRiskControl:       "true",
@@ -206,9 +292,9 @@ func TestConfigManagerUndecryptableTokenStillFailsClosedForBlockingIntent(t *tes
 func TestBuildNextStoragePreserveReplaceAndClearToken(t *testing.T) {
 	manager := &ConfigManager{encryptor: prefixEncryptor{}, encryptionKeyConfigured: true}
 	current := DefaultStorageConfig()
-	current.Endpoints = []StorageEndpoint{{ID: "one", Name: "One", Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", Model: DefaultGuardModel, TokenCiphertext: "enc:old", TimeoutMS: 1000, InputLimit: 1000}}
-	base := UpdateConfigRequest{ExpectedConfigVersion: 1, Strategy: "priority", WorkerCount: 1, QueueCapacity: 10, Scanners: []string{"PII"}, AllGroups: true,
-		Endpoints: []UpdateEndpoint{{ID: "one", Name: "One", Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", TimeoutMS: 1000, InputLimit: 1000}}}
+	current.Endpoints = []StorageEndpoint{{ID: "one", Name: "One", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", Model: DefaultGuardModel, TokenCiphertext: "enc:old", TimeoutMS: 1000}}
+	base := UpdateConfigRequest{ExpectedConfigVersion: 1, Strategy: StrategyOrderedAll, AggregationStrategy: AggregationAnyBlock, WorkerCount: 1, QueueCapacity: 10, Scanners: []string{"PII"}, AllGroups: true,
+		Endpoints: []UpdateEndpoint{{ID: "one", Name: "One", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", TimeoutMS: 1000}}}
 	preserved, err := manager.buildNextStorage(current, base, 9)
 	require.NoError(t, err)
 	require.Equal(t, "enc:old", preserved.Endpoints[0].TokenCiphertext)
@@ -234,9 +320,9 @@ func TestBuildNextStoragePreserveReplaceAndClearToken(t *testing.T) {
 func TestBuildNextStorageRejectsNewTokenWithoutConfiguredEncryptionKey(t *testing.T) {
 	manager := &ConfigManager{encryptor: prefixEncryptor{}, encryptionKeyConfigured: false}
 	current := DefaultStorageConfig()
-	current.Endpoints = []StorageEndpoint{{ID: "one", Name: "One", Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", Model: DefaultGuardModel, TokenCiphertext: "enc:old", TimeoutMS: 1000, InputLimit: 1000}}
-	base := UpdateConfigRequest{ExpectedConfigVersion: 1, Strategy: "priority", WorkerCount: 1, QueueCapacity: 10, Scanners: []string{"PII"}, AllGroups: true,
-		Endpoints: []UpdateEndpoint{{ID: "one", Name: "One", Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", TimeoutMS: 1000, InputLimit: 1000}}}
+	current.Endpoints = []StorageEndpoint{{ID: "one", Name: "One", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", Model: DefaultGuardModel, TokenCiphertext: "enc:old", TimeoutMS: 1000}}
+	base := UpdateConfigRequest{ExpectedConfigVersion: 1, Strategy: StrategyOrderedAll, AggregationStrategy: AggregationAnyBlock, WorkerCount: 1, QueueCapacity: 10, Scanners: []string{"PII"}, AllGroups: true,
+		Endpoints: []UpdateEndpoint{{ID: "one", Name: "One", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible", BaseURL: "http://127.0.0.1:8080", TimeoutMS: 1000}}}
 
 	newTokenReq := base
 	newTokenReq.Endpoints = append([]UpdateEndpoint(nil), base.Endpoints...)
@@ -412,7 +498,8 @@ func TestParseLegacyConfigDefaultsMissingFieldsWithoutEnablingBlocking(t *testin
 	storage, err := ParseStorageConfig(`{"enabled":false,"config_version":9}`)
 	require.NoError(t, err)
 	require.False(t, storage.BlockingEnabled)
-	require.Equal(t, "priority", storage.Strategy)
+	require.Equal(t, StrategyOrderedAll, storage.Strategy)
+	require.Equal(t, AggregationAnyBlock, storage.AggregationStrategy)
 	require.Equal(t, DefaultWorkerCount, storage.WorkerCount)
 	require.Equal(t, DefaultQueueCapacity, storage.QueueCapacity)
 	require.Equal(t, AllScannerIDs, storage.Scanners)
@@ -422,6 +509,10 @@ func TestParseLegacyConfigDefaultsMissingFieldsWithoutEnablingBlocking(t *testin
 func TestUpdateConfigStrictBoundsAndKnownValues(t *testing.T) {
 	valid := promptAuditUpdateRequest(1, 1, "")
 	require.NoError(t, validateUpdateConfigRequest(valid))
+	largeTimeout := valid
+	largeTimeout.Endpoints = append([]UpdateEndpoint(nil), valid.Endpoints...)
+	largeTimeout.Endpoints[0].TimeoutMS = 300000
+	require.NoError(t, validateUpdateConfigRequest(largeTimeout))
 
 	tests := []struct {
 		name   string
@@ -429,6 +520,7 @@ func TestUpdateConfigStrictBoundsAndKnownValues(t *testing.T) {
 		reason string
 	}{
 		{name: "strategy", mutate: func(req *UpdateConfigRequest) { req.Strategy = "round_robin" }, reason: "prompt_audit_invalid_strategy"},
+		{name: "aggregation", mutate: func(req *UpdateConfigRequest) { req.AggregationStrategy = "weighted" }, reason: "prompt_audit_invalid_aggregation_strategy"},
 		{name: "worker low", mutate: func(req *UpdateConfigRequest) { req.WorkerCount = 0 }, reason: "prompt_audit_invalid_worker_count"},
 		{name: "worker high", mutate: func(req *UpdateConfigRequest) { req.WorkerCount = MaxWorkerCount + 1 }, reason: "prompt_audit_invalid_worker_count"},
 		{name: "capacity low", mutate: func(req *UpdateConfigRequest) { req.QueueCapacity = 0 }, reason: "prompt_audit_invalid_queue_capacity"},
@@ -437,9 +529,12 @@ func TestUpdateConfigStrictBoundsAndKnownValues(t *testing.T) {
 		{name: "group required", mutate: func(req *UpdateConfigRequest) { req.AllGroups = false; req.GroupIDs = nil }, reason: "prompt_audit_groups_required"},
 		{name: "group positive", mutate: func(req *UpdateConfigRequest) { req.AllGroups = false; req.GroupIDs = []int64{0} }, reason: "prompt_audit_invalid_group"},
 		{name: "timeout low", mutate: func(req *UpdateConfigRequest) { req.Endpoints[0].TimeoutMS = MinTimeoutMS - 1 }, reason: "prompt_audit_invalid_timeout"},
-		{name: "timeout high", mutate: func(req *UpdateConfigRequest) { req.Endpoints[0].TimeoutMS = MaxTimeoutMS + 1 }, reason: "prompt_audit_invalid_timeout"},
-		{name: "input low", mutate: func(req *UpdateConfigRequest) { req.Endpoints[0].InputLimit = MinInputLimit - 1 }, reason: "prompt_audit_invalid_input_limit"},
-		{name: "input high", mutate: func(req *UpdateConfigRequest) { req.Endpoints[0].InputLimit = MaxInputLimit + 1 }, reason: "prompt_audit_invalid_input_limit"},
+		{name: "timeout overflow", mutate: func(req *UpdateConfigRequest) {
+			req.Endpoints[0].TimeoutMS = maxRepresentableTimeoutMS + 1
+		}, reason: "prompt_audit_invalid_timeout"},
+		{name: "timeout budget overflow", mutate: func(req *UpdateConfigRequest) {
+			req.Endpoints[0].TimeoutMS = maxRepresentableTimeoutMS
+		}, reason: "prompt_audit_invalid_timeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

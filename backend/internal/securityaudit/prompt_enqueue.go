@@ -3,6 +3,7 @@ package securityaudit
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 type Enqueuer struct {
@@ -11,6 +12,9 @@ type Enqueuer struct {
 	payload PayloadStore
 	metrics Metrics
 }
+
+// promptAuditMaxAttempts 固定异步审计任务最多执行三次。
+const promptAuditMaxAttempts = 3
 
 func NewEnqueuer(config ConfigStore, repo JobRepository, payload PayloadStore, metrics ...Metrics) *Enqueuer {
 	var metric Metrics
@@ -50,7 +54,13 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "snapshot_invalid"}))
 		return nil
 	}
-	job, err := e.repo.CreateStagingWithCapacity(ctx, snapshot.Redacted(), cfg.ConfigVersion, 3, cfg.QueueCapacity)
+	ttl, err := payloadTTL(cfg, promptAuditMaxAttempts)
+	if err != nil {
+		e.recordDropped()
+		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "invalid_timeout_budget"}))
+		return err
+	}
+	job, err := e.repo.CreateStagingWithCapacity(ctx, snapshot.Redacted(), cfg.ConfigVersion, promptAuditMaxAttempts, cfg.QueueCapacity)
 	if err != nil {
 		code := "database_unavailable"
 		if errors.Is(err, ErrQueueFull) {
@@ -65,7 +75,7 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 		e.recordDropped()
 		return err
 	}
-	if err := e.payload.Set(ctx, job.ID, snapshot.ScanText, DefaultPayloadTTL); err != nil {
+	if err := e.payload.Set(ctx, job.ID, snapshot.ScanText, ttl); err != nil {
 		_ = e.repo.MarkStagingFailed(ctx, job.ID, "payload_store_failed", "payload store unavailable")
 		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{
 			"job_id": job.ID, "status": "dropped", "error_code": "payload_store_failed",
@@ -90,6 +100,51 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 		e.metrics.IncEnqueued()
 	}
 	return nil
+}
+
+func payloadTTL(cfg ActiveConfig, maxAttempts int) (time.Duration, error) {
+	timeouts := make([]int64, 0, len(cfg.Endpoints))
+	for _, endpoint := range cfg.EnabledEndpoints() {
+		timeouts = append(timeouts, endpoint.TimeoutMS)
+	}
+	return timeoutBudgetTTL(timeouts, maxAttempts)
+}
+
+func timeoutBudgetTTL(timeouts []int64, maxAttempts int) (time.Duration, error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	var perAttemptMS int64
+	for _, configuredTimeout := range timeouts {
+		timeout := configuredTimeout
+		if timeout <= 0 {
+			timeout = DefaultTimeoutMS
+		}
+		if timeout > maxRepresentableTimeoutMS-perAttemptMS {
+			return 0, errors.New("prompt audit timeout budget exceeds duration range")
+		}
+		perAttemptMS += timeout
+	}
+	if perAttemptMS > maxRepresentableTimeoutMS/int64(maxAttempts) {
+		return 0, errors.New("prompt audit timeout budget exceeds duration range")
+	}
+	totalMS := int64(maxAttempts) * perAttemptMS
+	for attempt := 1; attempt < maxAttempts; attempt++ {
+		backoffMS := retryBackoff(attempt).Milliseconds()
+		if backoffMS > maxRepresentableTimeoutMS-totalMS {
+			return 0, errors.New("prompt audit timeout budget exceeds duration range")
+		}
+		totalMS += backoffMS
+	}
+	safetyMarginMS := (5 * time.Minute).Milliseconds()
+	if safetyMarginMS > maxRepresentableTimeoutMS-totalMS {
+		return 0, errors.New("prompt audit timeout budget exceeds duration range")
+	}
+	total := time.Duration(totalMS+safetyMarginMS) * time.Millisecond
+	if total < DefaultPayloadTTL {
+		return DefaultPayloadTTL, nil
+	}
+	return total, nil
 }
 
 func (e *Enqueuer) recordDropped() {

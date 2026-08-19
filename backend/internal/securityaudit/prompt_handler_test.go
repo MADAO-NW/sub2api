@@ -222,15 +222,16 @@ func TestPromptAdminRejectsInvalidEventIDsTimesAndPagination(t *testing.T) {
 func validHandlerUpdateRequest(token string) UpdateConfigRequest {
 	return UpdateConfigRequest{
 		ExpectedConfigVersion: 7,
-		Strategy:              "priority",
+		Strategy:              StrategyOrderedAll,
+		AggregationStrategy:   AggregationAnyBlock,
 		WorkerCount:           1,
 		QueueCapacity:         10,
 		Scanners:              []string{"pii"},
 		AllGroups:             true,
 		Endpoints: []UpdateEndpoint{{
-			ID: "guard-1", Name: "Guard One", Protocol: "openai_compatible",
+			ID: "guard-1", Name: "Guard One", Adapter: AdapterQwen3Guard, Protocol: "openai_compatible",
 			BaseURL: "http://127.0.0.1:18080", Model: DefaultGuardModel, Token: token,
-			TimeoutMS: 1000, InputLimit: 1024, Enabled: true,
+			TimeoutMS: 1000, Enabled: true,
 		}},
 	}
 }

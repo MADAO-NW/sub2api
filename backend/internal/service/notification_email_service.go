@@ -31,6 +31,8 @@ const (
 	NotificationEmailEventContentModerationViolation  = "content_moderation.violation_notice"
 	NotificationEmailEventContentModerationDisabled   = "content_moderation.account_disabled"
 	NotificationEmailEventCyberPolicyNotice           = "content_moderation.cyber_policy_notice"
+	NotificationEmailEventPromptAuditWarning          = "prompt_audit.warning"
+	NotificationEmailEventPromptAuditAccountDisabled  = "prompt_audit.account_disabled"
 	NotificationEmailEventOpsAlert                    = "ops.alert"
 	NotificationEmailEventOpsScheduledReport          = "ops.scheduled_report"
 
@@ -898,97 +900,115 @@ func isSafeNotificationEmailURL(raw string) bool {
 func notificationEmailSampleVariables(locale string) map[string]string {
 	if normalizeNotificationLocale(locale) == notificationEmailLocaleChinese {
 		variables := map[string]string{
-			"site_name":           defaultSiteName,
-			"recipient_name":      "张三",
-			"recipient_email":     "user@example.com",
-			"verification_code":   "123456",
-			"expires_in_minutes":  "15",
-			"reset_url":           "https://example.com/reset-password?token=preview",
-			"subscription_group":  "Claude Pro",
-			"subscription_days":   "30",
-			"expiry_time":         "2026-06-18 12:00",
-			"days_remaining":      "3",
-			"current_balance":     "12.34",
-			"threshold":           "20.00",
-			"recharge_url":        "https://example.com/recharge",
-			"recharge_amount":     "50.00",
-			"order_id":            "1024",
-			"unsubscribe_url":     "https://example.com/unsubscribe",
-			"account_id":          "1001",
-			"account_name":        "openai-main",
-			"platform":            "openai",
-			"quota_dimension":     "每日额度",
-			"quota_used":          "80.00",
-			"quota_limit":         "100.00",
-			"quota_remaining":     "20.00",
-			"quota_threshold":     "20%",
-			"triggered_at":        "2026-05-20 12:00:00",
-			"group_name":          "默认分组",
-			"moderation_category": "violence",
-			"moderation_score":    "0.982",
-			"violation_count":     "2",
-			"ban_threshold":       "3",
-			"rule_name":           "错误率过高",
-			"severity":            "critical",
-			"alert_status":        "firing",
-			"metric_type":         "error_rate",
-			"operator":            ">=",
-			"metric_value":        "12.50",
-			"threshold_value":     "10.00",
-			"alert_description":   "最近 10 分钟错误率超过阈值",
-			"report_name":         "日报",
-			"report_type":         "daily_summary",
-			"report_start_time":   "2026-07-18T01:00:26Z",
-			"report_end_time":     "2026-07-19T01:00:26Z",
-			"report_html":         "<h2>日报</h2><p>请求量：2,374</p>",
+			"site_name":                 defaultSiteName,
+			"recipient_name":            "张三",
+			"recipient_email":           "user@example.com",
+			"verification_code":         "123456",
+			"expires_in_minutes":        "15",
+			"reset_url":                 "https://example.com/reset-password?token=preview",
+			"subscription_group":        "Claude Pro",
+			"subscription_days":         "30",
+			"expiry_time":               "2026-06-18 12:00",
+			"days_remaining":            "3",
+			"current_balance":           "12.34",
+			"threshold":                 "20.00",
+			"recharge_url":              "https://example.com/recharge",
+			"recharge_amount":           "50.00",
+			"order_id":                  "1024",
+			"unsubscribe_url":           "https://example.com/unsubscribe",
+			"account_id":                "1001",
+			"account_name":              "openai-main",
+			"platform":                  "openai",
+			"quota_dimension":           "每日额度",
+			"quota_used":                "80.00",
+			"quota_limit":               "100.00",
+			"quota_remaining":           "20.00",
+			"quota_threshold":           "20%",
+			"triggered_at":              "2026-05-20 12:00:00",
+			"group_name":                "默认分组",
+			"moderation_category":       "violence",
+			"moderation_score":          "0.982",
+			"violation_count":           "2",
+			"ban_threshold":             "3",
+			"audit_user_id":             "1001",
+			"audit_username":            "张三",
+			"audit_action_id":           "2048",
+			"audit_triggered_at":        "2026-05-20 12:00:00",
+			"audit_categories":          "PII, Jailbreak",
+			"audit_window_count":        "10",
+			"audit_violation_count":     "3",
+			"audit_violation_threshold": "3",
+			"audit_account_status":      "disabled",
+			"rule_name":                 "错误率过高",
+			"severity":                  "critical",
+			"alert_status":              "firing",
+			"metric_type":               "error_rate",
+			"operator":                  ">=",
+			"metric_value":              "12.50",
+			"threshold_value":           "10.00",
+			"alert_description":         "最近 10 分钟错误率超过阈值",
+			"report_name":               "日报",
+			"report_type":               "daily_summary",
+			"report_start_time":         "2026-07-18T01:00:26Z",
+			"report_end_time":           "2026-07-19T01:00:26Z",
+			"report_html":               "<h2>日报</h2><p>请求量：2,374</p>",
 		}
 		addNotificationEmailOpsSummarySampleVariables(variables)
 		return variables
 	}
 	variables := map[string]string{
-		"site_name":           defaultSiteName,
-		"recipient_name":      "Alex",
-		"recipient_email":     "user@example.com",
-		"verification_code":   "123456",
-		"expires_in_minutes":  "15",
-		"reset_url":           "https://example.com/reset-password?token=preview",
-		"subscription_group":  "Claude Pro",
-		"subscription_days":   "30",
-		"expiry_time":         "2026-06-18 12:00",
-		"days_remaining":      "3",
-		"current_balance":     "12.34",
-		"threshold":           "20.00",
-		"recharge_url":        "https://example.com/recharge",
-		"recharge_amount":     "50.00",
-		"order_id":            "1024",
-		"unsubscribe_url":     "https://example.com/unsubscribe",
-		"account_id":          "1001",
-		"account_name":        "openai-main",
-		"platform":            "openai",
-		"quota_dimension":     "Daily quota",
-		"quota_used":          "80.00",
-		"quota_limit":         "100.00",
-		"quota_remaining":     "20.00",
-		"quota_threshold":     "20%",
-		"triggered_at":        "2026-05-20 12:00:00",
-		"group_name":          "Default group",
-		"moderation_category": "violence",
-		"moderation_score":    "0.982",
-		"violation_count":     "2",
-		"ban_threshold":       "3",
-		"rule_name":           "High error rate",
-		"severity":            "critical",
-		"alert_status":        "firing",
-		"metric_type":         "error_rate",
-		"operator":            ">=",
-		"metric_value":        "12.50",
-		"threshold_value":     "10.00",
-		"alert_description":   "Error rate exceeded threshold in the last 10 minutes.",
-		"report_name":         "Daily summary",
-		"report_type":         "daily_summary",
-		"report_start_time":   "2026-07-18T01:00:26Z",
-		"report_end_time":     "2026-07-19T01:00:26Z",
-		"report_html":         "<h2>Daily summary</h2><p>Requests: 2,374</p>",
+		"site_name":                 defaultSiteName,
+		"recipient_name":            "Alex",
+		"recipient_email":           "user@example.com",
+		"verification_code":         "123456",
+		"expires_in_minutes":        "15",
+		"reset_url":                 "https://example.com/reset-password?token=preview",
+		"subscription_group":        "Claude Pro",
+		"subscription_days":         "30",
+		"expiry_time":               "2026-06-18 12:00",
+		"days_remaining":            "3",
+		"current_balance":           "12.34",
+		"threshold":                 "20.00",
+		"recharge_url":              "https://example.com/recharge",
+		"recharge_amount":           "50.00",
+		"order_id":                  "1024",
+		"unsubscribe_url":           "https://example.com/unsubscribe",
+		"account_id":                "1001",
+		"account_name":              "openai-main",
+		"platform":                  "openai",
+		"quota_dimension":           "Daily quota",
+		"quota_used":                "80.00",
+		"quota_limit":               "100.00",
+		"quota_remaining":           "20.00",
+		"quota_threshold":           "20%",
+		"triggered_at":              "2026-05-20 12:00:00",
+		"group_name":                "Default group",
+		"moderation_category":       "violence",
+		"moderation_score":          "0.982",
+		"violation_count":           "2",
+		"ban_threshold":             "3",
+		"audit_user_id":             "1001",
+		"audit_username":            "Alex",
+		"audit_action_id":           "2048",
+		"audit_triggered_at":        "2026-05-20 12:00:00",
+		"audit_categories":          "PII, Jailbreak",
+		"audit_window_count":        "10",
+		"audit_violation_count":     "3",
+		"audit_violation_threshold": "3",
+		"audit_account_status":      "disabled",
+		"rule_name":                 "High error rate",
+		"severity":                  "critical",
+		"alert_status":              "firing",
+		"metric_type":               "error_rate",
+		"operator":                  ">=",
+		"metric_value":              "12.50",
+		"threshold_value":           "10.00",
+		"alert_description":         "Error rate exceeded threshold in the last 10 minutes.",
+		"report_name":               "Daily summary",
+		"report_type":               "daily_summary",
+		"report_start_time":         "2026-07-18T01:00:26Z",
+		"report_end_time":           "2026-07-19T01:00:26Z",
+		"report_html":               "<h2>Daily summary</h2><p>Requests: 2,374</p>",
 	}
 	addNotificationEmailOpsSummarySampleVariables(variables)
 	return variables
@@ -1032,6 +1052,8 @@ var notificationEmailEventOrder = []string{
 	NotificationEmailEventContentModerationViolation,
 	NotificationEmailEventContentModerationDisabled,
 	NotificationEmailEventCyberPolicyNotice,
+	NotificationEmailEventPromptAuditWarning,
+	NotificationEmailEventPromptAuditAccountDisabled,
 	NotificationEmailEventOpsAlert,
 	NotificationEmailEventOpsScheduledReport,
 }
@@ -1128,6 +1150,28 @@ var notificationEmailEventDefinitions = map[string]NotificationEmailEventInfo{
 		Optional:    false,
 		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
 			"triggered_at", "model", "group_name", "upstream_message"),
+	},
+	NotificationEmailEventPromptAuditWarning: {
+		Event:       NotificationEmailEventPromptAuditWarning,
+		Label:       "Prompt Audit warning",
+		Description: "Sent when a user's Prompt Audit violation window reaches the configured warning threshold.",
+		Category:    "risk_control",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"audit_user_id", "audit_username", "audit_action_id", "audit_triggered_at",
+			"audit_categories", "audit_window_count", "audit_violation_count",
+			"audit_violation_threshold", "audit_account_status"),
+	},
+	NotificationEmailEventPromptAuditAccountDisabled: {
+		Event:       NotificationEmailEventPromptAuditAccountDisabled,
+		Label:       "Prompt Audit account disabled",
+		Description: "Sent after Prompt Audit automatically disables a user account.",
+		Category:    "risk_control",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"audit_user_id", "audit_username", "audit_action_id", "audit_triggered_at",
+			"audit_categories", "audit_window_count", "audit_violation_count",
+			"audit_violation_threshold", "audit_account_status"),
 	},
 	NotificationEmailEventOpsAlert: {
 		Event:       NotificationEmailEventOpsAlert,
@@ -1402,6 +1446,64 @@ var notificationEmailOfficialTemplates = map[string]map[string]notificationEmail
   <tr><td style="width:128px;vertical-align:top;">上游说明</td><td style="overflow-wrap:anywhere;word-break:break-all;white-space:pre-wrap;">{{upstream_message}}</td></tr>
 </table>
 <p>如认为系误判，可调整请求措辞后重试，或申请获得授权的安全访问权限。</p>`),
+		},
+	},
+	NotificationEmailEventPromptAuditWarning: {
+		notificationEmailDefaultLocale: {
+			Subject: "[{{site_name}}] Prompt Audit warning - {{audit_username}}",
+			HTML: notificationEmailCard("#d97706", "Prompt Audit warning", `
+<p>Prompt Audit reached the configured warning threshold for user <strong>{{audit_username}}</strong> (ID {{audit_user_id}}).</p>
+<table style="width:100%;border-collapse:collapse;">
+  <tr><td>Triggered at</td><td>{{audit_triggered_at}}</td></tr>
+  <tr><td>Action ID</td><td>{{audit_action_id}}</td></tr>
+  <tr><td>Categories</td><td>{{audit_categories}}</td></tr>
+  <tr><td>Recent classifications</td><td>{{audit_window_count}}</td></tr>
+  <tr><td>Violations / Threshold</td><td>{{audit_violation_count}} / {{audit_violation_threshold}}</td></tr>
+  <tr><td>Account status</td><td>{{audit_account_status}}</td></tr>
+</table>
+<p>This notification contains classification facts only; it does not include the audited prompt or model response.</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[{{site_name}}] 提示词审计提醒 - {{audit_username}}",
+			HTML: notificationEmailCard("#d97706", "提示词审计提醒", `
+<p>用户 <strong>{{audit_username}}</strong>（ID {{audit_user_id}}）已达到提示词审计提醒阈值。</p>
+<table style="width:100%;border-collapse:collapse;">
+  <tr><td>触发时间</td><td>{{audit_triggered_at}}</td></tr>
+  <tr><td>动作 ID</td><td>{{audit_action_id}}</td></tr>
+  <tr><td>命中类别</td><td>{{audit_categories}}</td></tr>
+  <tr><td>最近成功分类数</td><td>{{audit_window_count}}</td></tr>
+  <tr><td>违规数 / 阈值</td><td>{{audit_violation_count}} / {{audit_violation_threshold}}</td></tr>
+  <tr><td>账号状态</td><td>{{audit_account_status}}</td></tr>
+</table>
+<p>本邮件只包含分类事实，不包含被审核 Prompt 或模型完整响应。</p>`),
+		},
+	},
+	NotificationEmailEventPromptAuditAccountDisabled: {
+		notificationEmailDefaultLocale: {
+			Subject: "[{{site_name}}] Account disabled by Prompt Audit - {{audit_username}}",
+			HTML: notificationEmailCard("#b91c1c", "Account disabled by Prompt Audit", `
+<p>Prompt Audit automatically disabled user <strong>{{audit_username}}</strong> (ID {{audit_user_id}}) after the cumulative violation threshold was reached.</p>
+<table style="width:100%;border-collapse:collapse;">
+  <tr><td>Disabled at</td><td>{{audit_triggered_at}}</td></tr>
+  <tr><td>Action ID</td><td>{{audit_action_id}}</td></tr>
+  <tr><td>Categories</td><td>{{audit_categories}}</td></tr>
+  <tr><td>Violations / Threshold</td><td>{{audit_violation_count}} / {{audit_violation_threshold}}</td></tr>
+  <tr><td>Account status</td><td>{{audit_account_status}}</td></tr>
+</table>
+<p>This notification contains classification facts only; it does not include the audited prompt or model response.</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[{{site_name}}] 提示词审计已停用账号 - {{audit_username}}",
+			HTML: notificationEmailCard("#b91c1c", "提示词审计已停用账号", `
+<p>用户 <strong>{{audit_username}}</strong>（ID {{audit_user_id}}）达到累计违规阈值，提示词审计已自动停用该账号。</p>
+<table style="width:100%;border-collapse:collapse;">
+  <tr><td>停用时间</td><td>{{audit_triggered_at}}</td></tr>
+  <tr><td>动作 ID</td><td>{{audit_action_id}}</td></tr>
+  <tr><td>命中类别</td><td>{{audit_categories}}</td></tr>
+  <tr><td>违规数 / 阈值</td><td>{{audit_violation_count}} / {{audit_violation_threshold}}</td></tr>
+  <tr><td>账号状态</td><td>{{audit_account_status}}</td></tr>
+</table>
+<p>本邮件只包含分类事实，不包含被审核 Prompt 或模型完整响应。</p>`),
 		},
 	},
 	NotificationEmailEventOpsAlert: {
