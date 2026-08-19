@@ -243,8 +243,11 @@ Nginx 默认会丢弃名称中含下划线的请求头（如 `session_id`），�
 #### 安装步骤
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | sudo bash
 ```
+
+本 fork 固定跟随 `madao` 发布通道。版本标签采用
+`v<上游版本>-madao.<序号>`（例如 `v0.1.177-madao.1`），安装脚本和后台在线更新都会忽略其他通道的 Release。
 
 脚本会自动：
 1. 检测系统架构
@@ -293,7 +296,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # 卸载
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---

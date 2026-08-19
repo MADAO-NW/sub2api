@@ -2,7 +2,7 @@
 #
 # Sub2API Installation Script
 # Sub2API 安装脚本
-# Usage: curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | bash
 #
 
 set -e
@@ -30,8 +30,11 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Configuration
-GITHUB_REPO="Wei-Shaw/sub2api"
+# Fork release configuration
+GITHUB_REPO="MADAO-NW/sub2api"
+UPDATE_CHANNEL="madao"
+CHANNEL_VERSION_PATTERN="v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-${UPDATE_CHANNEL}\.[1-9][0-9]*"
+CHANNEL_VERSION_REGEX="^${CHANNEL_VERSION_PATTERN}$"
 INSTALL_DIR="/opt/sub2api"
 SERVICE_NAME="sub2api"
 SERVICE_USER="sub2api"
@@ -73,6 +76,7 @@ declare -A MSG_ZH=(
     ["fetching_version"]="正在获取最新版本..."
     ["latest_version"]="最新版本"
     ["failed_get_version"]="获取最新版本失败"
+    ["invalid_channel_version"]="版本号必须符合 v<上游版本>-madao.<序号>"
     ["downloading"]="正在下载"
     ["download_failed"]="下载失败"
     ["verifying_checksum"]="正在校验文件..."
@@ -198,6 +202,7 @@ declare -A MSG_EN=(
     ["fetching_version"]="Fetching latest version..."
     ["latest_version"]="Latest version"
     ["failed_get_version"]="Failed to get latest version"
+    ["invalid_channel_version"]="Version must match v<upstream-version>-madao.<sequence>"
     ["downloading"]="Downloading"
     ["download_failed"]="Download failed"
     ["verifying_checksum"]="Verifying checksum..."
@@ -528,10 +533,50 @@ github_api_curl() {
     fi
 }
 
+# List fork release tags in descending semantic version order.
+get_channel_versions() {
+    local releases
+    releases=$(github_api_curl -s --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100" 2>/dev/null || true)
+
+    printf '%s\n' "$releases" |
+        grep '"tag_name"' |
+        sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' |
+        grep -E "$CHANNEL_VERSION_REGEX" |
+        awk -F '[-.]' '{
+            major=$1
+            sub(/^v/, "", major)
+            printf "%010d.%010d.%010d.%010d %s\n", major, $2, $3, $5, $0
+        }' |
+        LC_ALL=C sort -r |
+        sed -E 's/^[^ ]+ //' || true
+}
+
+# Check that the release contains the binary archive required by this platform.
+release_has_platform_archive() {
+    local version="$1"
+    local version_num=${version#v}
+    local archive_name="sub2api_${version_num}_${OS}_${ARCH}.tar.gz"
+    local release
+
+    release=$(github_api_curl -s --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${version}" 2>/dev/null || true)
+    printf '%s\n' "$release" |
+        grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${archive_name}\""
+}
+
 # Get latest release version
 get_latest_version() {
     print_info "$(msg 'fetching_version')"
-    LATEST_VERSION=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    LATEST_VERSION=""
+
+    local version
+    while IFS= read -r version; do
+        if [ -n "$version" ] && release_has_platform_archive "$version"; then
+            LATEST_VERSION="$version"
+            break
+        fi
+    done < <(get_channel_versions)
 
     if [ -z "$LATEST_VERSION" ]; then
         print_error "$(msg 'failed_get_version')"
@@ -547,7 +592,7 @@ list_versions() {
     print_info "$(msg 'fetching_versions')"
 
     local versions
-    versions=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | head -20)
+    versions=$(get_channel_versions | head -20)
 
     if [ -z "$versions" ]; then
         print_error "$(msg 'failed_get_version')"
@@ -580,19 +625,14 @@ validate_version() {
         version="v$version"
     fi
 
-    print_info "$(msg 'validating_version') $version" >&2
-
-    # Check if the release exists
-    local http_code
-    http_code=$(github_api_curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${version}" 2>/dev/null)
-
-    # Check for network errors (empty or non-numeric response)
-    if [ -z "$http_code" ] || ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
-        print_error "Network error: Failed to connect to GitHub API" >&2
+    if [[ ! "$version" =~ $CHANNEL_VERSION_REGEX ]]; then
+        print_error "$(msg 'invalid_channel_version'): $version" >&2
         exit 1
     fi
 
-    if [ "$http_code" != "200" ]; then
+    print_info "$(msg 'validating_version') $version" >&2
+
+    if ! release_has_platform_archive "$version"; then
         print_error "$(msg 'version_not_found'): $version" >&2
         echo "" >&2
         list_versions >&2
@@ -606,8 +646,9 @@ validate_version() {
 # Get current installed version
 get_current_version() {
     if [ -f "$INSTALL_DIR/sub2api" ]; then
-        # Use grep -E for better compatibility (works on macOS and Linux)
-        "$INSTALL_DIR/sub2api" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown"
+        "$INSTALL_DIR/sub2api" --version 2>&1 |
+            grep -oE "$CHANNEL_VERSION_PATTERN" |
+            head -1 || echo "unknown"
     else
         echo "not_installed"
     fi
@@ -718,7 +759,7 @@ install_service() {
     cat > /etc/systemd/system/sub2api.service << EOF
 [Unit]
 Description=Sub2API - AI API Gateway Platform
-Documentation=https://github.com/Wei-Shaw/sub2api
+Documentation=https://github.com/${GITHUB_REPO}
 After=network.target postgresql.service redis.service
 Wants=postgresql.service redis.service
 
@@ -863,7 +904,7 @@ upgrade() {
     print_info "$(msg 'upgrading')"
 
     # Get current version
-    CURRENT_VERSION=$("$INSTALL_DIR/sub2api" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+    CURRENT_VERSION=$(get_current_version)
     print_info "$(msg 'current_version'): $CURRENT_VERSION"
 
     # Stop service

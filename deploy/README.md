@@ -376,12 +376,15 @@ For production servers using systemd.
 ### One-Line Installation
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | sudo bash
 ```
+
+The installer follows the fork's `madao` channel and accepts release tags in
+the form `v<upstream-version>-madao.<sequence>`.
 
 ### Manual Installation
 
-1. Download the latest release from [GitHub Releases](https://github.com/Wei-Shaw/sub2api/releases)
+1. Download the latest `madao` release from [GitHub Releases](https://github.com/MADAO-NW/sub2api/releases)
 2. Extract and copy the binary to `/opt/sub2api/`
 3. Copy `sub2api.service` to `/etc/systemd/system/`
 4. Run:

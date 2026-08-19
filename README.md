@@ -241,8 +241,12 @@ One-click installation script that downloads pre-built binaries from GitHub Rele
 #### Installation Steps
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | sudo bash
 ```
+
+This fork follows the `madao` release channel. Release tags use
+`v<upstream-version>-madao.<sequence>` (for example, `v0.1.177-madao.1`);
+the installer and online updater ignore releases from other channels.
 
 The script will:
 1. Detect your system architecture
@@ -291,7 +295,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # Uninstall
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---

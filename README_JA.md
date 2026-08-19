@@ -242,8 +242,12 @@ GitHub Releases からビルド済みバイナリをダウンロードするワ�
 #### インストール手順
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | sudo bash
 ```
+
+この fork は `madao` リリースチャンネルを使用します。タグ形式は
+`v<upstream-version>-madao.<sequence>`（例: `v0.1.177-madao.1`）で、
+インストーラーとオンラインアップデーターは他のチャンネルの Release を無視します。
 
 スクリプトは以下を実行します:
 1. システムアーキテクチャの検出
@@ -292,7 +296,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # アンインストール
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/MADAO-NW/sub2api/release/madao/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---

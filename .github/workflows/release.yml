@@ -10,37 +10,61 @@ on:
         description: 'Tag to release (e.g., v1.0.0)'
         required: true
         type: string
-      simple_release:
-        description: 'Simple release: only x86_64 GHCR image, skip other artifacts'
-        required: false
-        type: boolean
-        default: false
 
-# 环境变量：合并 workflow_dispatch 输入和 repository variable
-# tag push 触发时读取 vars.SIMPLE_RELEASE，workflow_dispatch 时使用输入参数
+# madao 通道必须始终发布安装脚本和在线更新所需的二进制归档。
 env:
-  SIMPLE_RELEASE: ${{ github.event.inputs.simple_release == 'true' || vars.SIMPLE_RELEASE == 'true' }}
+  SIMPLE_RELEASE: false
+  RELEASE_BRANCH: release/madao
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  UPDATE_REPOSITORY: ${{ github.repository }}
+  UPDATE_CHANNEL: madao
 
 permissions:
   contents: write
   packages: write
 
 jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate fork release tag and branch
+        run: |
+          CHANNEL_VERSION_REGEX="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-${UPDATE_CHANNEL}\.[1-9][0-9]*$"
+          if [[ ! "$RELEASE_TAG" =~ $CHANNEL_VERSION_REGEX ]]; then
+            echo "Invalid fork release tag: $RELEASE_TAG"
+            echo "Expected: v<upstream-version>-${UPDATE_CHANNEL}.<sequence>"
+            exit 1
+          fi
+
+          git fetch origin "${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          TAG_COMMIT=$(git rev-list -n 1 "$RELEASE_TAG")
+          if [ -z "$TAG_COMMIT" ]; then
+            echo "Tag does not exist: $RELEASE_TAG"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" "origin/${RELEASE_BRANCH}"; then
+            echo "Tag $RELEASE_TAG does not point to a commit on $RELEASE_BRANCH"
+            exit 1
+          fi
+
   # Update VERSION file with tag version
   update-version:
+    needs: [validate-release]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Update VERSION file
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=${{ github.event.inputs.tag }}
-            VERSION=${VERSION#v}
-          else
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
+          VERSION=${RELEASE_TAG#v}
           echo "$VERSION" > backend/cmd/server/VERSION
           echo "Updated VERSION file to: $VERSION"
 
@@ -52,10 +76,13 @@ jobs:
           retention-days: 1
 
   build-frontend:
+    needs: [validate-release]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -92,7 +119,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Download VERSION artifact
         uses: actions/download-artifact@v8
@@ -148,11 +175,7 @@ jobs:
       - name: Get tag message
         id: tag_message
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_NAME=${{ github.event.inputs.tag }}
-          else
-            TAG_NAME=${GITHUB_REF#refs/tags/}
-          fi
+          TAG_NAME="$RELEASE_TAG"
           echo "Processing tag: $TAG_NAME"
 
           # 获取完整的 tag message（跳过第一行标题）
@@ -176,7 +199,7 @@ jobs:
         uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
-          args: release --clean --skip=validate ${{ env.SIMPLE_RELEASE == 'true' && '--config=.goreleaser.simple.yaml' || '' }}
+          args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_MESSAGE: ${{ steps.tag_message.outputs.message }}
@@ -184,6 +207,9 @@ jobs:
           GITHUB_REPO_OWNER_LOWER: ${{ steps.lowercase.outputs.owner }}
           GITHUB_REPO_NAME: ${{ github.event.repository.name }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'skip' }}
+          UPDATE_REPOSITORY: ${{ env.UPDATE_REPOSITORY }}
+          UPDATE_CHANNEL: ${{ env.UPDATE_CHANNEL }}
+          RELEASE_BRANCH: ${{ env.RELEASE_BRANCH }}
 
       # Update DockerHub description
       - name: Update DockerHub description
@@ -213,11 +239,7 @@ jobs:
             exit 0
           fi
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_NAME=${{ github.event.inputs.tag }}
-          else
-            TAG_NAME=${GITHUB_REF#refs/tags/}
-          fi
+          TAG_NAME="$RELEASE_TAG"
           VERSION=${TAG_NAME#v}
           REPO="${{ github.repository }}"
           GHCR_IMAGE="ghcr.io/${REPO,,}"  # ${,,} converts to lowercase
@@ -280,16 +302,11 @@ jobs:
       - name: Checkout default branch
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ env.RELEASE_BRANCH }}
 
       - name: Sync VERSION file to released tag
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=${{ github.event.inputs.tag }}
-            VERSION=${VERSION#v}
-          else
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
+          VERSION=${RELEASE_TAG#v}
 
           CURRENT_VERSION=$(tr -d '\r\n' < backend/cmd/server/VERSION || true)
           if [ "$CURRENT_VERSION" = "$VERSION" ]; then
@@ -303,4 +320,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add backend/cmd/server/VERSION
           git commit -m "chore: sync VERSION to ${VERSION} [skip ci]"
-          git push origin HEAD:${{ github.event.repository.default_branch }}
+          git push origin "HEAD:${RELEASE_BRANCH}"
