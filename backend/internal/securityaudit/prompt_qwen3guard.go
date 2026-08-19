@@ -117,9 +117,7 @@ func ParseQwen3Guard(content string, enabledScanners []string) (*NormalizedResul
 	if strings.Contains(content, "```") || strings.HasPrefix(content, "{") || strings.HasPrefix(content, "[") {
 		return nil, invalidGuardOutput("unexpected_output_wrapper")
 	}
-	if strings.HasSuffix(content, "\n") {
-		content = strings.TrimSuffix(content, "\n")
-	}
+	content = strings.TrimSuffix(content, "\n")
 	lines := strings.Split(content, "\n")
 	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
 		return nil, invalidGuardOutput("invalid_line_count")

@@ -314,27 +314,6 @@ func (s *PromptService) Probe(ctx context.Context, request ProbeRequest) ProbeRe
 	})
 }
 
-func modelsResponseReady(body []byte, model string) bool {
-	var response struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(body, &response) != nil || response.Data == nil {
-		return false
-	}
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return true
-	}
-	for _, item := range response.Data {
-		if strings.TrimSpace(item.ID) == model {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *PromptService) resolveProbeEndpoint(input UpdateEndpoint) (ActiveEndpoint, bool, error) {
 	baseURL, err := NormalizeBaseURL(input.BaseURL)
 	if err != nil {

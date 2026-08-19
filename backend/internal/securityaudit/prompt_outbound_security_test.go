@@ -129,7 +129,10 @@ func TestThirdPartyScannerRepairsInvalidProtocolOnceAndRetainsFailedCall(t *test
 		messages, ok := payload["messages"].([]any)
 		require.True(t, ok)
 		require.Len(t, messages, 2)
-		system := messages[0].(map[string]any)["content"].(string)
+		systemMessage, ok := messages[0].(map[string]any)
+		require.True(t, ok)
+		system, ok := systemMessage["content"].(string)
+		require.True(t, ok)
 		if call == 1 {
 			require.NotContains(t, system, "[FORMAT REPAIR")
 			_, _ = w.Write([]byte(`{
@@ -176,10 +179,10 @@ func TestThirdPartyScannerStopsAfterOneFailedFormatRepair(t *testing.T) {
 	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		call := calls.Add(1)
-		_, _ = w.Write([]byte(fmt.Sprintf(
+		_, _ = fmt.Fprintf(w,
 			`{"choices":[{"message":{"content":"Safety: Safe\nCategories: None\nextra-%d"}}]}`,
 			call,
-		)))
+		)
 	}))
 	defer server.Close()
 
