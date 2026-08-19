@@ -35,6 +35,10 @@ var (
 	Commit    = "unknown"
 	Date      = "unknown"
 	BuildType = "source" // "source" for manual builds, "release" for CI builds (set by ldflags)
+	// UpdateRepository 由二开 Release 构建通过 ldflags 注入；空值沿用官方仓库。
+	UpdateRepository = ""
+	// UpdateChannel 由二开 Release 构建通过 ldflags 注入；空值按版本推导通道。
+	UpdateChannel = ""
 )
 
 func init() {
@@ -144,8 +148,10 @@ func runMainServer() {
 	}
 
 	buildInfo := handler.BuildInfo{
-		Version:   Version,
-		BuildType: BuildType,
+		Version:          Version,
+		BuildType:        BuildType,
+		UpdateRepository: UpdateRepository,
+		UpdateChannel:    UpdateChannel,
 	}
 
 	app, err := initializeApplication(buildInfo)

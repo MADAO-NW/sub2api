@@ -29,6 +29,8 @@ export default {
     viewRelease: '查看发布',
     viewChangelog: '查看更新日志',
     refresh: '刷新',
+    updateSourceWarning: '在线更新警告',
+    updateSource: '更新源：{repository} · 通道：{channel}',
     sourceMode: '源码构建',
     sourceModeHint: '源码构建请使用 git pull 更新',
     updateNow: '立即更新',

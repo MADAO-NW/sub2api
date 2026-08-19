@@ -29,6 +29,8 @@ export default {
     viewRelease: 'View Release',
     viewChangelog: 'View Changelog',
     refresh: 'Refresh',
+    updateSourceWarning: 'Online update warning',
+    updateSource: 'Source: {repository} · channel: {channel}',
     sourceMode: 'Source Build',
     sourceModeHint: 'Source build, use git pull to update',
     updateNow: 'Update Now',
