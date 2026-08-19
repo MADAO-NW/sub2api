@@ -70,6 +70,8 @@ type Handlers struct {
 
 // BuildInfo contains build-time information
 type BuildInfo struct {
-	Version   string
-	BuildType string // "source" for manual builds, "release" for CI builds
+	Version          string
+	BuildType        string // "source" for manual builds, "release" for CI builds
+	UpdateRepository string // 空值使用官方仓库，非空值由 fork 构建通过 ldflags 注入
+	UpdateChannel    string // 空值按当前版本推导 stable 或 prerelease 通道
 }

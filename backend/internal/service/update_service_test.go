@@ -12,18 +12,21 @@ import (
 )
 
 type updateServiceCacheStub struct {
-	data string
+	data map[string]string
 }
 
-func (s *updateServiceCacheStub) GetUpdateInfo(context.Context) (string, error) {
-	if s.data == "" {
+func (s *updateServiceCacheStub) GetUpdateInfo(_ context.Context, namespace string) (string, error) {
+	if s.data == nil || s.data[namespace] == "" {
 		return "", errors.New("cache miss")
 	}
-	return s.data, nil
+	return s.data[namespace], nil
 }
 
-func (s *updateServiceCacheStub) SetUpdateInfo(_ context.Context, data string, _ time.Duration) error {
-	s.data = data
+func (s *updateServiceCacheStub) SetUpdateInfo(_ context.Context, namespace, data string, _ time.Duration) error {
+	if s.data == nil {
+		s.data = map[string]string{}
+	}
+	s.data[namespace] = data
 	return nil
 }
 
@@ -31,13 +34,17 @@ type updateServiceGitHubClientStub struct {
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
+	latestRepos    []string
+	recentRepos    []string
 }
 
-func (s *updateServiceGitHubClientStub) FetchLatestRelease(context.Context, string) (*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchLatestRelease(_ context.Context, repository string) (*GitHubRelease, error) {
+	s.latestRepos = append(s.latestRepos, repository)
 	return s.release, nil
 }
 
-func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchRecentReleases(_ context.Context, repository string, _ int) ([]*GitHubRelease, error) {
+	s.recentRepos = append(s.recentRepos, repository)
 	return s.recentReleases, s.recentErr
 }
 
@@ -184,4 +191,79 @@ func TestUpdateServiceRollbackToVersionAcceptsVPrefix(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrRollbackVersionNotAllowed)
 	require.Contains(t, err.Error(), "no compatible release found")
+}
+
+func TestUpdateServiceInvalidConfiguredRepositoryDisablesWithoutOfficialFallback(t *testing.T) {
+	client := &updateServiceGitHubClientStub{}
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		client,
+		"1.2.3",
+		"release",
+		"invalid/repo/extra",
+		"stable",
+	)
+
+	info, err := svc.CheckUpdate(context.Background(), true)
+
+	require.NoError(t, err)
+	require.False(t, info.HasUpdate)
+	require.Contains(t, info.Warning, "online update disabled")
+	require.Equal(t, "invalid", info.UpdateRepository)
+	require.Empty(t, client.latestRepos)
+	require.Empty(t, client.recentRepos)
+	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrOnlineUpdateDisabled)
+}
+
+func TestUpdateServiceCustomPrereleaseChannelUsesRecentMatchingReleases(t *testing.T) {
+	client := &updateServiceGitHubClientStub{recentReleases: []*GitHubRelease{
+		{TagName: "v1.2.3-audit.2", Name: "audit 2", Prerelease: true},
+		{TagName: "v1.2.3-beta.99", Name: "beta", Prerelease: true},
+		{TagName: "v1.2.4", Name: "stable"},
+		{TagName: "v1.2.3-audit.10", Name: "audit 10", Prerelease: true},
+		{TagName: "v1.2.3-audit.11", Name: "draft", Prerelease: true, Draft: true},
+	}}
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		client,
+		"1.2.3-audit.1",
+		"release",
+		"example/sub2api",
+		"",
+	)
+
+	info, err := svc.CheckUpdate(context.Background(), true)
+
+	require.NoError(t, err)
+	require.True(t, info.HasUpdate)
+	require.Equal(t, "1.2.3-audit.10", info.LatestVersion)
+	require.Equal(t, "example/sub2api", info.UpdateRepository)
+	require.Equal(t, "audit", info.UpdateChannel)
+	require.Empty(t, client.latestRepos, "prerelease channels must not use /releases/latest")
+	require.Equal(t, []string{"example/sub2api"}, client.recentRepos)
+}
+
+func TestUpdateServiceStableCustomRepositoryAndCacheNamespace(t *testing.T) {
+	cache := &updateServiceCacheStub{}
+	client := &updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v1.2.4", Name: "stable"}}
+	svc := NewUpdateService(cache, client, "1.2.3", "release", "example/sub2api", "stable")
+
+	first, err := svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.True(t, first.HasUpdate)
+	require.Equal(t, []string{"example/sub2api"}, client.latestRepos)
+	require.Contains(t, cache.data, "example:sub2api:stable")
+
+	cached, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.True(t, cached.Cached)
+	require.Equal(t, "example/sub2api", cached.UpdateRepository)
+	require.Equal(t, "stable", cached.UpdateChannel)
+}
+
+func TestCompareVersionsUsesSemverPrereleasePrecedence(t *testing.T) {
+	require.Less(t, compareVersions("1.2.3-audit.2", "1.2.3-audit.10"), 0)
+	require.Less(t, compareVersions("1.2.3-rc.1", "1.2.3"), 0)
+	require.Greater(t, compareVersions("1.2.4-audit.1", "1.2.3-audit.99"), 0)
+	require.Equal(t, 0, compareVersions("1.2.3+build.1", "1.2.3+build.2"))
 }

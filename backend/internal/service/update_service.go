@@ -25,12 +25,12 @@ import (
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
+	ErrOnlineUpdateDisabled      = infraerrors.Conflict("ONLINE_UPDATE_DISABLED", "online update is disabled by invalid build-time update source")
 )
 
 const (
-	updateCacheKey = "update_check_cache"
-	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	updateCacheTTL     = 1200 // 20 minutes
+	officialGitHubRepo = "Wei-Shaw/sub2api"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -47,8 +47,8 @@ const (
 
 // UpdateCache defines cache operations for update service
 type UpdateCache interface {
-	GetUpdateInfo(ctx context.Context) (string, error)
-	SetUpdateInfo(ctx context.Context, data string, ttl time.Duration) error
+	GetUpdateInfo(ctx context.Context, namespace string) (string, error)
+	SetUpdateInfo(ctx context.Context, namespace, data string, ttl time.Duration) error
 }
 
 // GitHubReleaseClient 获取 GitHub release 信息的接口
@@ -61,31 +61,55 @@ type GitHubReleaseClient interface {
 
 // UpdateService handles software updates
 type UpdateService struct {
-	cache          UpdateCache
-	githubClient   GitHubReleaseClient
-	currentVersion string
-	buildType      string // "source" for manual builds, "release" for CI builds
+	cache            UpdateCache
+	githubClient     GitHubReleaseClient
+	currentVersion   string
+	buildType        string // "source" for manual builds, "release" for CI builds
+	updateRepository string
+	updateChannel    string
+	updateCacheKey   string
+	sourceWarning    string
 }
 
 // NewUpdateService creates a new UpdateService
-func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string) *UpdateService {
+func NewUpdateService(
+	cache UpdateCache,
+	githubClient GitHubReleaseClient,
+	version, buildType string,
+	updateSource ...string,
+) *UpdateService {
+	repository := ""
+	channel := ""
+	if len(updateSource) > 0 {
+		repository = updateSource[0]
+	}
+	if len(updateSource) > 1 {
+		channel = updateSource[1]
+	}
+	repository, channel, warning := resolveUpdateSource(version, repository, channel)
 	return &UpdateService{
-		cache:          cache,
-		githubClient:   githubClient,
-		currentVersion: version,
-		buildType:      buildType,
+		cache:            cache,
+		githubClient:     githubClient,
+		currentVersion:   version,
+		buildType:        buildType,
+		updateRepository: repository,
+		updateChannel:    channel,
+		updateCacheKey:   updateCacheNamespace(repository, channel),
+		sourceWarning:    warning,
 	}
 }
 
 // UpdateInfo contains update information
 type UpdateInfo struct {
-	CurrentVersion string       `json:"current_version"`
-	LatestVersion  string       `json:"latest_version"`
-	HasUpdate      bool         `json:"has_update"`
-	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
-	Cached         bool         `json:"cached"`
-	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source" or "release"
+	CurrentVersion   string       `json:"current_version"`
+	LatestVersion    string       `json:"latest_version"`
+	HasUpdate        bool         `json:"has_update"`
+	ReleaseInfo      *ReleaseInfo `json:"release_info,omitempty"`
+	Cached           bool         `json:"cached"`
+	Warning          string       `json:"warning,omitempty"`
+	BuildType        string       `json:"build_type"` // "source" or "release"
+	UpdateRepository string       `json:"update_repository"`
+	UpdateChannel    string       `json:"update_channel"`
 }
 
 // ReleaseInfo contains GitHub release details
@@ -131,6 +155,17 @@ type GitHubAsset struct {
 
 // CheckUpdate checks for available updates
 func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInfo, error) {
+	if s.sourceWarning != "" {
+		return &UpdateInfo{
+			CurrentVersion:   s.currentVersion,
+			LatestVersion:    s.currentVersion,
+			HasUpdate:        false,
+			Warning:          s.sourceWarning,
+			BuildType:        s.buildType,
+			UpdateRepository: s.updateRepository,
+			UpdateChannel:    s.updateChannel,
+		}, nil
+	}
 	// Try cache first
 	if !force {
 		if cached, err := s.getFromCache(ctx); err == nil && cached != nil {
@@ -147,11 +182,13 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			return cached, nil
 		}
 		return &UpdateInfo{
-			CurrentVersion: s.currentVersion,
-			LatestVersion:  s.currentVersion,
-			HasUpdate:      false,
-			Warning:        err.Error(),
-			BuildType:      s.buildType,
+			CurrentVersion:   s.currentVersion,
+			LatestVersion:    s.currentVersion,
+			HasUpdate:        false,
+			Warning:          err.Error(),
+			BuildType:        s.buildType,
+			UpdateRepository: s.updateRepository,
+			UpdateChannel:    s.updateChannel,
 		}, nil
 	}
 
@@ -163,6 +200,9 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s.sourceWarning != "" {
+		return ErrOnlineUpdateDisabled
+	}
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -307,6 +347,9 @@ func (s *UpdateService) Rollback() error {
 // strictly older than the current version (the current version itself is excluded),
 // newest first. Draft and prerelease entries are skipped.
 func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVersion, error) {
+	if s.sourceWarning != "" {
+		return nil, ErrOnlineUpdateDisabled
+	}
 	releases, err := s.fetchRollbackCandidates(ctx)
 	if err != nil {
 		return nil, err
@@ -327,6 +370,9 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // The target must be one of the versions returned by ListRollbackVersions;
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
+	if s.sourceWarning != "" {
+		return ErrOnlineUpdateDisabled
+	}
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
 		return ErrRollbackVersionNotAllowed
@@ -363,7 +409,7 @@ func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) e
 // fetchRollbackCandidates fetches recent releases and keeps the newest
 // maxRollbackVersions entries strictly older than the current version.
 func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubRelease, error) {
-	releases, err := s.githubClient.FetchRecentReleases(ctx, githubRepo, rollbackFetchPageSize)
+	releases, err := s.githubClient.FetchRecentReleases(ctx, s.updateRepository, rollbackFetchPageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +417,7 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 	seen := make(map[string]bool, len(releases))
 	candidates := make([]*GitHubRelease, 0, maxRollbackVersions)
 	for _, r := range releases {
-		if r == nil || r.Draft || r.Prerelease {
+		if r == nil || r.Draft || !releaseMatchesUpdateChannel(r, s.updateChannel) {
 			continue
 		}
 		v := strings.TrimPrefix(r.TagName, "v")
@@ -400,7 +446,7 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 }
 
 func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {
-	release, err := s.githubClient.FetchLatestRelease(ctx, githubRepo)
+	release, err := s.fetchLatestReleaseForChannel(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -417,9 +463,11 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 	}
 
 	return &UpdateInfo{
-		CurrentVersion: s.currentVersion,
-		LatestVersion:  latestVersion,
-		HasUpdate:      compareVersions(s.currentVersion, latestVersion) < 0,
+		CurrentVersion:   s.currentVersion,
+		LatestVersion:    latestVersion,
+		HasUpdate:        compareVersions(s.currentVersion, latestVersion) < 0,
+		UpdateRepository: s.updateRepository,
+		UpdateChannel:    s.updateChannel,
 		ReleaseInfo: &ReleaseInfo{
 			Name:        release.Name,
 			Body:        release.Body,
@@ -430,6 +478,39 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 		Cached:    false,
 		BuildType: s.buildType,
 	}, nil
+}
+
+func (s *UpdateService) fetchLatestReleaseForChannel(ctx context.Context) (*GitHubRelease, error) {
+	if s.updateChannel == "stable" {
+		release, err := s.githubClient.FetchLatestRelease(ctx, s.updateRepository)
+		if err != nil {
+			return nil, err
+		}
+		if release == nil || release.Draft || !releaseMatchesUpdateChannel(release, s.updateChannel) {
+			return nil, fmt.Errorf("latest release does not match stable update channel")
+		}
+		return release, nil
+	}
+	releases, err := s.githubClient.FetchRecentReleases(ctx, s.updateRepository, 100)
+	if err != nil {
+		return nil, err
+	}
+	var latest *GitHubRelease
+	for _, release := range releases {
+		if release == nil || release.Draft || !releaseMatchesUpdateChannel(release, s.updateChannel) {
+			continue
+		}
+		if latest == nil || compareVersions(
+			strings.TrimPrefix(latest.TagName, "v"),
+			strings.TrimPrefix(release.TagName, "v"),
+		) < 0 {
+			latest = release
+		}
+	}
+	if latest == nil {
+		return nil, fmt.Errorf("no release found for update channel %s", s.updateChannel)
+	}
+	return latest, nil
 }
 
 func (s *UpdateService) downloadFile(ctx context.Context, downloadURL, dest string) error {
@@ -594,7 +675,7 @@ func (s *UpdateService) extractBinary(archivePath, destPath string) error {
 }
 
 func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
-	data, err := s.cache.GetUpdateInfo(ctx)
+	data, err := s.cache.GetUpdateInfo(ctx, s.updateCacheKey)
 	if err != nil {
 		return nil, err
 	}
@@ -613,12 +694,14 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	return &UpdateInfo{
-		CurrentVersion: s.currentVersion,
-		LatestVersion:  cached.Latest,
-		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
-		ReleaseInfo:    cached.ReleaseInfo,
-		Cached:         true,
-		BuildType:      s.buildType,
+		CurrentVersion:   s.currentVersion,
+		LatestVersion:    cached.Latest,
+		HasUpdate:        compareVersions(s.currentVersion, cached.Latest) < 0,
+		ReleaseInfo:      cached.ReleaseInfo,
+		Cached:           true,
+		BuildType:        s.buildType,
+		UpdateRepository: s.updateRepository,
+		UpdateChannel:    s.updateChannel,
 	}, nil
 }
 
@@ -634,33 +717,246 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	}
 
 	data, _ := json.Marshal(cacheData)
-	_ = s.cache.SetUpdateInfo(ctx, string(data), time.Duration(updateCacheTTL)*time.Second)
+	_ = s.cache.SetUpdateInfo(ctx, s.updateCacheKey, string(data), time.Duration(updateCacheTTL)*time.Second)
 }
 
-// compareVersions compares two semantic versions
-func compareVersions(current, latest string) int {
-	currentParts := parseVersion(current)
-	latestParts := parseVersion(latest)
+type semanticVersion struct {
+	core       [3]int
+	prerelease []string
+}
 
-	for i := 0; i < 3; i++ {
-		if currentParts[i] < latestParts[i] {
+func resolveUpdateSource(version, configuredRepository, configuredChannel string) (string, string, string) {
+	repository := strings.TrimSpace(configuredRepository)
+	if repository == "" {
+		repository = officialGitHubRepo
+	} else if !validGitHubRepository(repository) {
+		return "invalid", "disabled", "online update disabled: invalid build-time update repository"
+	}
+	channel := strings.TrimSpace(configuredChannel)
+	if channel == "" {
+		channel = updateChannelFromVersion(version)
+	}
+	if channel != "stable" && !validPrereleaseIdentifier(channel) {
+		return repository, "disabled", "online update disabled: invalid build-time update channel"
+	}
+	return repository, channel, ""
+}
+
+func validGitHubRepository(repository string) bool {
+	if len(repository) > 200 || strings.Count(repository, "/") != 1 {
+		return false
+	}
+	parts := strings.Split(repository, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+		for _, char := range part {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func validPrereleaseIdentifier(channel string) bool {
+	if channel == "" || len(channel) > 64 {
+		return false
+	}
+	for _, char := range channel {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func updateChannelFromVersion(version string) string {
+	parsed, ok := parseSemanticVersion(version)
+	if !ok || len(parsed.prerelease) == 0 {
+		return "stable"
+	}
+	return parsed.prerelease[0]
+}
+
+func updateCacheNamespace(repository, channel string) string {
+	return strings.ReplaceAll(repository, "/", ":") + ":" + channel
+}
+
+func releaseMatchesUpdateChannel(release *GitHubRelease, channel string) bool {
+	if release == nil {
+		return false
+	}
+	version, ok := parseSemanticVersion(release.TagName)
+	if !ok {
+		return false
+	}
+	if channel == "stable" {
+		return !release.Prerelease && len(version.prerelease) == 0
+	}
+	return release.Prerelease && len(version.prerelease) > 0 && version.prerelease[0] == channel
+}
+
+// compareVersions 按 SemVer 规则比较版本，并处理预发布版本优先级。
+func compareVersions(current, latest string) int {
+	currentVersion, currentOK := parseSemanticVersion(current)
+	latestVersion, latestOK := parseSemanticVersion(latest)
+	if !currentOK || !latestOK {
+		return compareLooseVersionCore(current, latest)
+	}
+	for index := range currentVersion.core {
+		if currentVersion.core[index] < latestVersion.core[index] {
 			return -1
 		}
-		if currentParts[i] > latestParts[i] {
+		if currentVersion.core[index] > latestVersion.core[index] {
 			return 1
 		}
+	}
+	return comparePrerelease(currentVersion.prerelease, latestVersion.prerelease)
+}
+
+func parseSemanticVersion(value string) (semanticVersion, bool) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	if buildIndex := strings.IndexByte(value, '+'); buildIndex >= 0 {
+		value = value[:buildIndex]
+	}
+	coreText := value
+	prereleaseText := ""
+	hasPrerelease := false
+	if prereleaseIndex := strings.IndexByte(value, '-'); prereleaseIndex >= 0 {
+		hasPrerelease = true
+		coreText = value[:prereleaseIndex]
+		prereleaseText = value[prereleaseIndex+1:]
+	}
+	coreParts := strings.Split(coreText, ".")
+	if len(coreParts) != 3 {
+		return semanticVersion{}, false
+	}
+	var result semanticVersion
+	for index, part := range coreParts {
+		if !validSemverNumericIdentifier(part) {
+			return semanticVersion{}, false
+		}
+		number, err := strconv.Atoi(part)
+		if err != nil {
+			return semanticVersion{}, false
+		}
+		result.core[index] = number
+	}
+	if !hasPrerelease {
+		return result, true
+	}
+	if prereleaseText == "" {
+		return semanticVersion{}, false
+	}
+	result.prerelease = strings.Split(prereleaseText, ".")
+	for _, identifier := range result.prerelease {
+		if !validPrereleaseIdentifier(identifier) {
+			return semanticVersion{}, false
+		}
+		if isNumericIdentifier(identifier) && len(identifier) > 1 && identifier[0] == '0' {
+			return semanticVersion{}, false
+		}
+	}
+	return result, true
+}
+
+func validSemverNumericIdentifier(value string) bool {
+	return isNumericIdentifier(value) && (len(value) == 1 || value[0] != '0')
+}
+
+func isNumericIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func comparePrerelease(left, right []string) int {
+	if len(left) == 0 && len(right) == 0 {
+		return 0
+	}
+	if len(left) == 0 {
+		return 1
+	}
+	if len(right) == 0 {
+		return -1
+	}
+	count := len(left)
+	if len(right) < count {
+		count = len(right)
+	}
+	for index := 0; index < count; index++ {
+		leftNumeric := isNumericIdentifier(left[index])
+		rightNumeric := isNumericIdentifier(right[index])
+		switch {
+		case leftNumeric && rightNumeric:
+			if len(left[index]) < len(right[index]) {
+				return -1
+			}
+			if len(left[index]) > len(right[index]) {
+				return 1
+			}
+			if left[index] < right[index] {
+				return -1
+			}
+			if left[index] > right[index] {
+				return 1
+			}
+		case leftNumeric:
+			return -1
+		case rightNumeric:
+			return 1
+		default:
+			if left[index] < right[index] {
+				return -1
+			}
+			if left[index] > right[index] {
+				return 1
+			}
+		}
+	}
+	if len(left) < len(right) {
+		return -1
+	}
+	if len(left) > len(right) {
+		return 1
 	}
 	return 0
 }
 
-func parseVersion(v string) [3]int {
-	v = strings.TrimPrefix(v, "v")
-	parts := strings.Split(v, ".")
-	result := [3]int{0, 0, 0}
-	for i := 0; i < len(parts) && i < 3; i++ {
-		if parsed, err := strconv.Atoi(parts[i]); err == nil {
-			result[i] = parsed
+func compareLooseVersionCore(left, right string) int {
+	parse := func(value string) [3]int {
+		value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+		parts := strings.Split(value, ".")
+		result := [3]int{}
+		for index := 0; index < len(parts) && index < len(result); index++ {
+			numberText := strings.SplitN(parts[index], "-", 2)[0]
+			if number, err := strconv.Atoi(numberText); err == nil {
+				result[index] = number
+			}
+		}
+		return result
+	}
+	leftCore := parse(left)
+	rightCore := parse(right)
+	for index := range leftCore {
+		if leftCore[index] < rightCore[index] {
+			return -1
+		}
+		if leftCore[index] > rightCore[index] {
+			return 1
 		}
 	}
-	return result
+	return 0
 }
