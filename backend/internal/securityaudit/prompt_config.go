@@ -16,13 +16,15 @@ import (
 )
 
 const (
-	DefaultWorkerCount         = 4
-	MaxWorkerCount             = 32
-	DefaultQueueCapacity       = 32768
-	MaxQueueCapacity           = 100000
-	DefaultTimeoutMS     int64 = 3000
-	MinTimeoutMS         int64 = 100
-	DefaultPayloadTTL          = 30 * time.Minute
+	// DefaultEndpointAdapter 是新增或缺失适配器时统一使用的第三方模型适配器。
+	DefaultEndpointAdapter       = AdapterOpenAICompatibleQwen
+	DefaultWorkerCount           = 4
+	MaxWorkerCount               = 32
+	DefaultQueueCapacity         = 32768
+	MaxQueueCapacity             = 100000
+	DefaultTimeoutMS       int64 = 3000
+	MinTimeoutMS           int64 = 100
+	DefaultPayloadTTL            = 30 * time.Minute
 	// maxRepresentableTimeoutMS 仅限制 Go time.Duration 可安全表示的毫秒值，不是业务上限。
 	maxRepresentableTimeoutMS int64 = math.MaxInt64 / int64(time.Millisecond)
 )
@@ -300,7 +302,7 @@ func normalizeStorageConfig(cfg *storageConfig) {
 		ep.Name = strings.TrimSpace(ep.Name)
 		ep.Adapter = strings.TrimSpace(ep.Adapter)
 		if ep.Adapter == "" {
-			ep.Adapter = AdapterQwen3Guard
+			ep.Adapter = DefaultEndpointAdapter
 		}
 		ep.Protocol = strings.TrimSpace(ep.Protocol)
 		if ep.Protocol == "" {

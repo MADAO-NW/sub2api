@@ -9,7 +9,7 @@
 - Prompt Audit 继续是 backend/internal/securityaudit 下的独立垂直模块，默认关闭。
 - 现有 Content Moderation 的 API、数据、邮件、Hash 和封号语义不变。
 - 网关 off/async/blocking 三态、协议错误 envelope 和无下游副作用门禁不变。
-- PromptSnapshot 提取逻辑不做功能改造；模型输入使用完整 scanText。
+- PromptSnapshot 保持现有 ScanText/FullPrompt/PromptHash 语义，同时从同一协议提取结果保留角色、逻辑消息顺序和轮次范围。
 - Guard Token 只存在于写 DTO、短生命周期解密内存和 Authorization header。
 - 完整 Prompt 只可存在于请求/Redis 临时载荷和管理员可访问的 Event full_prompt；Outcome、State、Action、邮件和普通日志禁止复制。
 - 不安装新 Go、前端或模型运行时依赖。
@@ -19,7 +19,7 @@
 - 协议 Handler → SecurityAudit Coordinator → 现有 Content Moderation 端口与 PromptService。
 - PromptService → ConfigManager、JobRepository、PayloadStore、Scanner、Metrics、Notification Worker。
 - PostgreSQL → Job、Event、Outcome、Enforcement State、Enforcement Action。
-- Redis → 临时完整扫描载荷与配置失效通知。
+- Redis → 可恢复角色与消息边界的临时扫描载荷，以及配置失效通知。
 - Admin API → PromptAdminHandler；用户恢复仍走现有 UserHandler/adminService.UpdateUser。
 - Vue 页面只依赖 Public DTO，不读取 Storage DTO、token_ciphertext、Redis key 或原始模型响应。
 
@@ -32,11 +32,12 @@
 - prompt_contract.go：默认管理员审核提示词、固定输出协议和协议版本。
 - prompt_config.go / prompt_config_store.go：Storage/Active/Public/Update DTO、校验、CAS、加密、顺序保留和规则修订。
 - prompt_qwen3guard.go：两类 adapter 的请求构造、OpenAI 响应 envelope、usage 和统一严格 parser。
-- prompt_model_runner.go：ordered-all、独立 timeout、聚合门槛和每模型明细。
+- prompt_snapshot.go / prompt_segments.go：兼容整份快照、可信角色片段、轮次范围、结构化 Redis Payload 与审核契约 Hash。
+- prompt_model_runner.go：Qwen 整份一次、第三方片段复用/必要联合审核、endpoint 一票、ordered-all 聚合和每模型明细。
 - prompt_guard.go：同步 fail-closed、bulkhead、结果记录与鉴权缓存失效。
 - prompt_worker.go：异步 claim、每模型前租约刷新、重试与动态 Payload TTL。
 - prompt_repository.go / prompt_event_repository.go：Job/Event/Outcome 完成事务和查询删除。
-- prompt_enforcement_repository.go：Outcome、State 行锁、邮件窗口、累计停用和单账号重置。
+- prompt_enforcement_repository.go / prompt_segment_repository.go：Outcome、完整结果查询、第三方片段结果与使用关系、State 行锁、邮件窗口、累计停用和单账号重置。
 - prompt_notification_worker.go：Action Outbox 分收件人投递。
 - prompt_metrics.go / prompt_runtime.go：总体、每模型、整条审核和处置统计。
 
@@ -45,6 +46,7 @@
 - backend/migrations/181_prompt_audit.sql 和 182_prompt_audit_full_prompt.sql 保持历史内容与 checksum 不变。
 - full_prompt 继续由 182 提供。
 - 新增 224_prompt_audit_enforcement.sql，一次性增加 model_results、Outcome、State、Action、失败调用诊断及相关索引；不回填历史分类结果或处置计数。
+- 新增 229_prompt_audit_result_reuse.sql，为 Outcome 增加完整复用与评估契约字段，并创建第三方片段结果、Outcome 使用关系和查询索引。
 
 前端：
 
@@ -53,7 +55,7 @@
 - PolicyPanel.vue：范围、九类 scanner、三种聚合与实时门槛。
 - EnforcementPanel.vue：管理员邮箱、普通提醒 N/M、累计停用 M。
 - RuntimeOverview.vue：每模型、整条 evaluation、聚合和处置统计。
-- EventDetailDialog.vue：每模型脱敏结构化结果。
+- EventDetailDialog.vue：每模型脱敏结构化结果、调用/命中摘要与第三方片段来源。
 - UsersView.vue：复用单账号启用动作，只补充统一成功提示。
 
 ## 4. 实施顺序
@@ -70,17 +72,17 @@
 
 ### 4.2 Scanner 与 ordered-all
 
-1. Qwen 请求：一条 user、seed=42。
-2. 第三方请求：一条 system、一条 user；system 为 audit_prompt + 两个换行 + FixedOutputPrompt。
+1. Qwen 请求：选定范围的完整 Prompt 作为一条 user、seed=42；不得增加角色 JSON 或角色提示词。
+2. 第三方片段/联合请求：一条 system、一条 user；system 为 audit_prompt + 固定角色/联合规则 + 可选纠格式提示 + FixedOutputPrompt，固定协议始终最后。
 3. 两类请求统一 temperature=0、stream=false，不发送 max_tokens 或 max_completion_tokens。
 4. 禁止 thinking、reasoning_effort、response_format 和动态 schema，由供应商和模型使用自身默认生成上限。
 5. 同一 parser 严格验证两行输出、官方类别名称/唯一性/分隔符和 Safety/Categories 配对；合法类别集合由服务端按固定目录确定性排序，乱序不得触发 format_repair。
-6. 所有启用模型按数组顺序执行；每个模型创建自己的 timeout context。timeout_ms 保留 100ms 最小值、不设置业务最大值，所有 time.Duration 和 Payload TTL 运算必须检查溢出。
-7. 无论前序 Block、达到门槛或失败，都继续后续模型。
-8. 模型输入只把内部优先级分隔符还原为两个换行，不分片、不截断。
-9. 冻结 prompt hash、协议版本、模型数、门槛、config version 和 timeout。
-10. 保存每模型 Safety、Categories、decision/action、latency、usage 和 error_code。
-11. async Worker 在每个模型调用前刷新租约，并在长调用期间每 30 秒刷新；刷新失败立即取消调用并依赖 claim_version/reclaimer 安全接管。
+6. 所有启用 endpoint 按数组顺序执行；每次实际模型调用创建自己的 timeout context。timeout_ms 保留 100ms 最小值、不设置业务最大值，所有 time.Duration 和 Payload TTL 运算必须检查溢出。
+7. Qwen 对完整 Prompt 调用一次；第三方按片段原顺序处理缓存未命中，同一 endpoint 相同审核键只调用一次。全部片段 Pass 直接形成该 endpoint 的 Pass；直接影响片段 Critical 直接形成 Critical；其余风险触发同 endpoint 一次联合审核。
+8. 每个 endpoint 最终只产生一个模型级结果和一票。无论前序 Block、达到门槛或失败，都继续后续 endpoint。
+9. 冻结整份/评估输入 Hash、评估和角色契约、固定协议、模型数、门槛、config version 和 timeout。
+10. 保存每模型输入模式、片段数/命中数/联合摘要、Safety、Categories、decision/action、latency、usage 和 error_code。
+11. async Worker 在每次实际模型调用前刷新租约，并在长调用期间每 30 秒刷新；刷新失败立即取消调用并依赖 claim_version/reclaimer 安全接管。
 
 ### 4.3 聚合与同步门禁
 
@@ -99,13 +101,13 @@ error/timeout 不缩小 N。达到门槛即 Block；全部失败进入 retry/fai
 ### 4.4 异步事务与重试
 
 1. Enqueue 继续使用 staging → Redis SET → queued。
-2. Payload TTL 按模型 timeout 总和、attempts、退避和安全余量计算；短任务沿用既有 30 分钟下限，不设置会让最大重试周期提前过期的硬上限。
+2. Redis Payload 保存版本化角色与逻辑消息数组；旧纯文本 Payload 继续按整份模式消费。TTL 按 Qwen 一次、第三方片段数加最多一次联合审核的 timeout 总和、attempts、退避和安全余量计算；短任务沿用既有 30 分钟下限，不设置会让最大重试周期提前过期的硬上限。
 3. Worker claim 后冻结本 attempt 配置。
 4. 每个模型调用前用 id + processing + claim_version 刷新租约。
 5. 第三方模型 HTTP 2xx 但 envelope、content 或两行协议无效时，在同一 timeout 内最多纠格式重试一次；固定输出协议仍位于 system 最后。
 6. 每次失败调用进入内部诊断集合；继续执行后续模型。
 7. 只有全部模型失败时才使用 Job retry/failed。
-8. 完成、重试或失败事务同时写入失败调用诊断；完成事务再写可选 Event、唯一 Outcome、State 和 Action。
+8. 完成、重试或失败事务同时写入失败调用诊断；完成事务再写可选 Event、唯一 Outcome、第三方原始片段结果及必要使用关系、State 和 Action。
 9. 提交后删除 Payload；失败依赖 TTL。
 10. 自动停用提交后失效该用户鉴权缓存。
 
@@ -211,20 +213,23 @@ Event 详情展示每模型脱敏结构化结果，不展示完整模型响应�
 后端单元测试至少覆盖：
 
 - 严格 parser 的正反例。
-- Qwen/第三方请求消息、字段禁用、固定协议顺序和 usage。
+- Qwen 完整请求一次、第三方角色规则/片段/联合请求、字段禁用、固定协议顺序和 usage。
 - 1/2/3/4 模型三种门槛。
 - endpoint 顺序、disabled 跳过、Block/error 后继续。
-- 完整长文本不分片、不截断。
+- Qwen 完整长文本不分片、不截断；第三方按逻辑角色片段审核且全 Pass 不联合。
 - 独立 timeout 和 error 不缩小分母。
 - 每模型明细与 partial failure。
 - Outcome 唯一、Pass 无 Event 仍有 Outcome、全部失败无 Outcome。
+- pass/flag/critical 完整历史命中跳过全部模型但仍写当前 Outcome 并执行当前用户处置；partial failure、复用来源、评估契约或冻结配置不一致不得复用，查询失败回退模型。
+- 第三方片段按 endpoint 批量命中、跨 endpoint 隔离、同请求唯一键去重、联合结果不缓存、必要使用关系直接指向原始片段结果。
+- Qwen Flag/Critical 与第三方 Pass 仍按 any_block/majority_block/all_block 的现有 endpoint 票数聚合。
 - 邮件边沿、跌回重布防、停用累计、admin/disabled、防重复动作。
 - 单账号事务重置不影响邮件窗口和历史。
 - 分收件人重试与邮件失败不回滚。
 
-集成测试至少覆盖按 181→182→224 顺序执行迁移、完成事务、并发 State 行锁、删除 Event/Job 后 Outcome 保留、重启后 Outbox 续投。
+集成测试至少覆盖按 181→182→224→229 顺序执行迁移、完成事务、历史来源持久化与失效、并发 State 行锁、删除 Event/Job 后 Outcome 保留、重启后 Outbox 续投。
 
-前端测试至少覆盖 endpoint 排序、adapter、只读固定协议、dirty/save 排除、三种聚合门槛、处置开关、Probe 草稿、运行态和每模型详情、用户启用提示。
+前端测试至少覆盖 endpoint 排序、新增模型默认第三方、编辑保留已保存 adapter、只读固定协议、dirty/save 排除、三种聚合门槛、处置开关、Probe 草稿、运行态、每模型/片段来源详情和用户启用提示。
 
 执行项目既有 go test、unit tag、API contract、OpenSpec validate；前端依赖未安装时不得自动安装，记录 typecheck/Vitest 未执行原因并等待明确依赖安装授权。
 

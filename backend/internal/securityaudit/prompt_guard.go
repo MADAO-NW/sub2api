@@ -47,11 +47,7 @@ func newGuardEvaluator(scanner PromptScanner, repo JobRepository, metrics Metric
 }
 
 func (g *GuardEvaluator) Evaluate(ctx context.Context, cfg ActiveConfig, snapshot PromptSnapshot) (*PromptDecision, error) {
-	if g == nil || g.scanner == nil {
-		if g != nil && g.metrics != nil {
-			g.metrics.Observe(DecisionUnavailable, 0)
-		}
-		logGuardFailure(snapshot, cfg, DecisionUnavailable, ErrorCodeUnavailable, "", 0)
+	if g == nil {
 		return nil, &GuardError{Code: ErrorCodeUnavailable}
 	}
 	start := g.clock.Now()
@@ -60,20 +56,9 @@ func (g *GuardEvaluator) Evaluate(ctx context.Context, cfg ActiveConfig, snapsho
 	endpoints := cfg.EnabledEndpoints()
 	if len(endpoints) == 0 {
 		if g.metrics != nil {
-			g.metrics.Observe(DecisionUnavailable, g.clock.Now().Sub(start))
+			g.metrics.Observe(DecisionUnavailable, 0)
 		}
-		logGuardFailure(snapshot, cfg, DecisionUnavailable, ErrorCodeUnavailable, "", g.clock.Now().Sub(start))
-		return nil, &GuardError{Code: ErrorCodeUnavailable}
-	}
-	select {
-	case g.global <- struct{}{}:
-		defer func() { <-g.global }()
-	default:
-		if g.metrics != nil {
-			g.metrics.IncBulkheadFull()
-			g.metrics.Observe(DecisionUnavailable, g.clock.Now().Sub(start))
-		}
-		logGuardFailure(snapshot, cfg, DecisionUnavailable, ErrorCodeUnavailable, "", g.clock.Now().Sub(start))
+		logGuardFailure(snapshot, cfg, DecisionUnavailable, ErrorCodeUnavailable, "", 0)
 		return nil, &GuardError{Code: ErrorCodeUnavailable}
 	}
 	if snapshot.ScanText == "" {
@@ -87,7 +72,37 @@ func (g *GuardEvaluator) Evaluate(ctx context.Context, cfg ActiveConfig, snapsho
 		"block_threshold":     CalculateBlockThreshold(cfg.AggregationStrategy, len(endpoints)),
 		"status":              "started",
 	}))
-	aggregated, err := runOrderedModels(ctx, cfg, snapshot.ScanText, g.clock, g.metrics, nil, g.scanModel)
+	resultSource := "model"
+	var aggregated *NormalizedResult
+	if g.repo != nil {
+		var lookupErr error
+		aggregated, lookupErr = g.repo.FindReusableResult(ctx, snapshot, cfg)
+		if lookupErr != nil {
+			LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{
+				"status": "history_lookup_fallback", "error_code": "history_lookup_failed", "stage": snapshot.Stage,
+			}))
+		}
+	}
+	if aggregated != nil {
+		resultSource = "history"
+	}
+	if aggregated == nil {
+		if g.scanner == nil {
+			if g.metrics != nil {
+				g.metrics.Observe(DecisionUnavailable, g.clock.Now().Sub(start))
+			}
+			logGuardFailure(snapshot, cfg, DecisionUnavailable, ErrorCodeUnavailable, "", g.clock.Now().Sub(start))
+			return nil, &GuardError{Code: ErrorCodeUnavailable}
+		}
+	}
+	var err error
+	if aggregated == nil {
+		var segmentFinder SegmentResultFinder
+		if finder, ok := g.repo.(SegmentResultFinder); ok {
+			segmentFinder = finder
+		}
+		aggregated, err = runOrderedModels(ctx, cfg, snapshot, g.clock, g.metrics, nil, g.scanModel, segmentFinder)
+	}
 	if err != nil {
 		kind := DecisionUnavailable
 		if guardErrorCode(err) == ErrorCodeInvalidResponse {
@@ -133,7 +148,8 @@ func (g *GuardEvaluator) Evaluate(ctx context.Context, cfg ActiveConfig, snapsho
 		"block_threshold":     aggregated.ModelResults.Aggregation.BlockThreshold,
 		"partial_failure":     aggregated.ModelResults.Aggregation.PartialFailure,
 		"latency_ms":          aggregated.LatencyMS, "guard_endpoint_id": aggregated.GuardEndpointID, "stage": snapshot.Stage,
-		"status": "completed",
+		"status": "completed", "result_source": resultSource,
+		"reused_from_outcome_id": pointerLogID(aggregated.ModelResults.Aggregation.ReusedFromOutcomeID),
 	}))
 	if g.repo != nil {
 		completion, recordErr := g.repo.RecordBlocking(ctx, snapshot.Redacted(), cfg, aggregated)
@@ -194,6 +210,15 @@ func logGuardFailure(snapshot PromptSnapshot, cfg ActiveConfig, kind DecisionKin
 }
 
 func (g *GuardEvaluator) scanModel(ctx context.Context, request ModelScanRequest) (*NormalizedResult, error) {
+	select {
+	case g.global <- struct{}{}:
+		defer func() { <-g.global }()
+	default:
+		if g.metrics != nil {
+			g.metrics.IncBulkheadFull()
+		}
+		return nil, &GuardError{Code: ErrorCodeUnavailable, DetailCode: "model_bulkhead_full", Retryable: true}
+	}
 	semaphore := g.nodeSemaphore(request.Endpoint.ID)
 	select {
 	case semaphore <- struct{}{}:

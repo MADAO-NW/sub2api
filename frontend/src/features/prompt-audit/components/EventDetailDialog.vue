@@ -80,12 +80,35 @@
             </dd>
             <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.promptContract') }}</dt>
             <dd class="break-all font-mono text-xs">{{ event.model_results.aggregation.prompt_contract_version }} · {{ event.model_results.aggregation.audit_prompt_hash }}</dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.evaluationContract') }}</dt>
+            <dd class="break-all font-mono text-xs">
+              {{ event.model_results.aggregation.evaluation_contract_version || '—' }}
+              <template v-if="event.model_results.aggregation.evaluation_input_hash"> · {{ event.model_results.aggregation.evaluation_input_hash }}</template>
+            </dd>
+            <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.modelCalls') }}</dt>
+            <dd class="tabular-nums">
+              {{ t('admin.promptAudit.events.technical.modelCallSummary', {
+                whole: event.model_results.aggregation.whole_model_call_count || 0,
+                segment: event.model_results.aggregation.segment_model_call_count || 0,
+                joint: event.model_results.aggregation.joint_model_call_count || 0,
+                hit: event.model_results.aggregation.segment_history_hit_count || 0,
+              }) }}
+            </dd>
+            <template v-if="event.model_results.aggregation.reused_from_outcome_id">
+              <dt class="text-gray-500">{{ t('admin.promptAudit.events.technical.resultSource') }}</dt>
+              <dd class="font-mono" data-test="history-result-source">
+                {{ t('admin.promptAudit.events.technical.historyResultSource') }} #{{ event.model_results.aggregation.reused_from_outcome_id }}
+              </dd>
+            </template>
           </dl>
 
           <section>
             <h4 class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.promptAudit.events.technical.modelResults') }}</h4>
             <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.promptAudit.events.technical.modelResultsHint') }}</p>
-            <div class="mt-3 overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
+            <p v-if="event.model_results.aggregation.reused_from_outcome_id" class="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 dark:border-dark-700 dark:bg-dark-900 dark:text-dark-300" data-test="history-model-results">
+              {{ t('admin.promptAudit.events.technical.historyModelResults') }}
+            </p>
+            <div v-else class="mt-3 overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
               <table class="min-w-full text-left text-xs">
                 <thead class="bg-gray-50 text-gray-500 dark:bg-dark-900/60 dark:text-dark-400">
                   <tr>
@@ -105,6 +128,9 @@
                     <td class="px-3 py-2">
                       <p class="font-medium text-gray-900 dark:text-white">{{ model.endpoint_id }}</p>
                       <p class="mt-0.5 text-[11px] text-gray-500 dark:text-dark-400">{{ model.adapter }} · {{ model.model }}</p>
+                      <p v-if="model.input_mode" class="mt-0.5 text-[11px] text-gray-500 dark:text-dark-400">
+                        {{ model.input_mode }}<template v-if="model.segment_total"> · {{ model.history_hit_count || 0 }}/{{ model.segment_total }} {{ t('admin.promptAudit.events.technical.historyHits') }}</template><template v-if="model.joint_evaluation?.executed"> · joint: {{ model.joint_evaluation.trigger || 'risk' }}</template>
+                      </p>
                     </td>
                     <td class="px-3 py-2 font-mono">{{ model.safety || '—' }}</td>
                     <td class="max-w-72 px-3 py-2">{{ model.categories?.length ? model.categories.join(', ') : '—' }}</td>
@@ -116,6 +142,37 @@
                       {{ formatModelUsage(model) }}
                     </td>
                     <td class="px-3 py-2 font-mono text-[11px]" :class="model.error_code ? 'text-red-600 dark:text-red-300' : ''">{{ model.error_code || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section v-if="event.segments?.length">
+            <h4 class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.promptAudit.events.technical.segmentResults') }}</h4>
+            <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.promptAudit.events.technical.segmentResultsHint') }}</p>
+            <div class="mt-3 overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
+              <table class="min-w-full text-left text-xs">
+                <thead class="bg-gray-50 text-gray-500 dark:bg-dark-900/60 dark:text-dark-400">
+                  <tr>
+                    <th class="px-3 py-2 font-medium">#</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.pool.node') }}</th>
+                    <th class="px-3 py-2 font-medium">Role / Scope</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.events.decision') }}</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.events.categories') }}</th>
+                    <th class="px-3 py-2 font-medium">{{ t('admin.promptAudit.events.technical.resultSource') }}</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 dark:divide-dark-800">
+                  <tr v-for="segment in event.segments" :key="`${segment.endpoint_id}-${segment.segment_order}`" data-test="segment-result">
+                    <td class="px-3 py-2 tabular-nums">{{ segment.segment_order }}</td>
+                    <td class="px-3 py-2 font-mono">{{ segment.endpoint_id }}</td>
+                    <td class="px-3 py-2 font-mono">{{ segment.source_role }} / {{ segment.turn_scope }}</td>
+                    <td class="whitespace-nowrap px-3 py-2">{{ formatDecisionAction(segment.decision, segment.action) }}</td>
+                    <td class="max-w-72 px-3 py-2">{{ formatCategories(segment.categories || []) }}</td>
+                    <td class="px-3 py-2 font-mono text-[11px]">
+                      {{ segment.reused_from_segment_result_id ? `${t('admin.promptAudit.events.technical.historySegment')} #${segment.reused_from_segment_result_id}` : t('admin.promptAudit.events.technical.currentSegment') }}
+                    </td>
                   </tr>
                 </tbody>
               </table>

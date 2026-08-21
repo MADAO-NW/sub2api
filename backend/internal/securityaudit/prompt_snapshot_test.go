@@ -373,6 +373,54 @@ func TestBlockingPromptSnapshotPreservesFullScopeByDefaultAndWithoutUserInput(t 
 	require.Equal(t, fullWithoutUser, narrowWithoutUser)
 }
 
+func TestPromptSnapshotPreservesRoleOrderScopeAndStructuredPayload(t *testing.T) {
+	req := Request{Protocol: "openai_chat_completions", Body: []byte(`{"messages":[
+		{"role":"system","content":"system instruction"},
+		{"role":"developer","content":"developer instruction"},
+		{"role":"user","content":"older user"},
+		{"role":"assistant","content":"previous answer"},
+		{"role":"tool","content":"tool output"},
+		{"role":"user","content":[{"type":"text","text":"current part one"},{"type":"text","text":"current part two"}]}
+	]}`)}
+	snapshot, err := ExtractPromptSnapshot(req)
+	require.NoError(t, err)
+	require.Equal(t, []string{"system", "developer", "user", "assistant", "tool", "user"}, auditSegmentField(snapshot.AuditSegments, func(segment AuditSegment) string { return segment.SourceRole }))
+	require.Equal(t, []string{"active", "active", "historical", "historical", "historical", "current"}, auditSegmentField(snapshot.AuditSegments, func(segment AuditSegment) string { return segment.TurnScope }))
+	require.Equal(t, "current part one\n\ncurrent part two", snapshot.AuditSegments[5].Content)
+
+	payload, err := encodePromptAuditPayload(snapshot)
+	require.NoError(t, err)
+	restored := snapshot.Redacted()
+	require.NoError(t, hydrateSnapshotFromPayload(&restored, payload))
+	require.Equal(t, snapshot.ScanText, restored.ScanText)
+	require.Equal(t, snapshot.AuditSegments, restored.AuditSegments)
+	require.Equal(t, snapshot.EvaluationInputHash, restored.EvaluationInputHash)
+}
+
+func TestBlockingRoleSegmentsKeepOriginalOrderForLatestScope(t *testing.T) {
+	req := Request{Protocol: "openai_chat_completions", Body: []byte(`{"messages":[
+		{"role":"system","content":"omitted system"},
+		{"role":"user","content":"older user"},
+		{"role":"assistant","content":"previous part one"},
+		{"role":"assistant","content":"previous part two"},
+		{"role":"user","content":"current part one"},
+		{"role":"user","content":"current part two"}
+	]}`)}
+	snapshot, err := ExtractBlockingPromptSnapshot(req, true)
+	require.NoError(t, err)
+	require.Equal(t, []string{"assistant", "assistant", "user", "user"}, auditSegmentField(snapshot.AuditSegments, func(segment AuditSegment) string { return segment.SourceRole }))
+	require.Equal(t, []string{"historical", "historical", "current", "current"}, auditSegmentField(snapshot.AuditSegments, func(segment AuditSegment) string { return segment.TurnScope }))
+	require.NotContains(t, snapshot.FullPrompt, "omitted system")
+}
+
+func auditSegmentField(segments []AuditSegment, value func(AuditSegment) string) []string {
+	result := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		result = append(result, value(segment))
+	}
+	return result
+}
+
 func TestBuildPromptPreviewKeepsOrdinaryTextWithinPreviewLimit(t *testing.T) {
 	prompt := strings.Repeat("机密业务提示词内容", 40)
 	preview := BuildPromptPreview(prompt, DefaultPromptPreviewMaxRunes)

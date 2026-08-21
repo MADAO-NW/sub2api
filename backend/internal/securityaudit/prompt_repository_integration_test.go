@@ -58,6 +58,7 @@ func openPromptAuditIntegrationDB(t *testing.T) *sql.DB {
 		"181_prompt_audit.sql",
 		"182_prompt_audit_full_prompt.sql",
 		"224_prompt_audit_enforcement.sql",
+		"229_prompt_audit_result_reuse.sql",
 	} {
 		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		require.NoError(t, err)
@@ -71,6 +72,145 @@ func openPromptAuditIntegrationDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	resetPromptAuditIntegrationDB(t, db)
 	return db
+}
+
+func TestPromptAuditReusesOnlyCompleteOriginalResultsFromMatchingConfig(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	cfg := integrationConfig(9, false)
+	cfg.Endpoints = []ActiveEndpoint{{ID: "guard-1", Adapter: AdapterQwen3Guard, Enabled: true}}
+	sourceUserID := insertIdentity(t, db, "users")
+	currentUserID := insertIdentity(t, db, "users")
+
+	for index, decision := range []EventDecision{EventPass, EventFlag, EventCritical} {
+		snapshot := integrationSnapshot(fmt.Sprintf("reuse-%d", index))
+		snapshot.UserID = sourceUserID
+		result := integrationResult(decision)
+		result.ModelResults.Aggregation.ConfigVersion = cfg.ConfigVersion
+		if decision == EventFlag {
+			result.RiskLevel, result.Action, result.Safety = RiskHigh, ActionWarn, "Controversial"
+		}
+		source, err := repo.RecordBlocking(ctx, snapshot, cfg, result)
+		require.NoError(t, err)
+		require.NotNil(t, source.Outcome)
+
+		reused, err := repo.FindReusableResult(ctx, snapshot, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, reused)
+		require.Equal(t, decision, reused.Decision)
+		require.NotNil(t, reused.ModelResults.Aggregation.ReusedFromOutcomeID)
+		require.Equal(t, source.Outcome.ID, *reused.ModelResults.Aggregation.ReusedFromOutcomeID)
+
+		current := integrationSnapshot(fmt.Sprintf("current-%d", index))
+		current.UserID = currentUserID
+		current.PromptHash = snapshot.PromptHash
+		current.EvaluationInputHash = snapshot.EvaluationInputHash
+		completion, err := repo.RecordBlocking(ctx, current, cfg, reused)
+		require.NoError(t, err)
+		require.NotNil(t, completion.Outcome.ReusedFromOutcomeID)
+		require.Equal(t, source.Outcome.ID, *completion.Outcome.ReusedFromOutcomeID)
+
+		again, err := repo.FindReusableResult(ctx, snapshot, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, again)
+		require.Equal(t, source.Outcome.ID, *again.ModelResults.Aggregation.ReusedFromOutcomeID)
+	}
+
+	partialSnapshot := integrationSnapshot("partial-reuse")
+	partial := integrationResult(EventCritical)
+	partial.ModelResults.Aggregation.ConfigVersion = cfg.ConfigVersion
+	partial.ModelResults.Aggregation.PartialFailure = true
+	_, err := repo.RecordBlocking(ctx, partialSnapshot, cfg, partial)
+	require.NoError(t, err)
+	reused, err := repo.FindReusableResult(ctx, partialSnapshot, cfg)
+	require.NoError(t, err)
+	require.Nil(t, reused)
+
+	configSnapshot := integrationSnapshot("config-reuse")
+	configResult := integrationResult(EventPass)
+	configResult.ModelResults.Aggregation.ConfigVersion = cfg.ConfigVersion
+	_, err = repo.RecordBlocking(ctx, configSnapshot, cfg, configResult)
+	require.NoError(t, err)
+	differentEvaluation := configSnapshot
+	differentEvaluation.EvaluationInputHash = strings.Repeat("e", 64)
+	reused, err = repo.FindReusableResult(ctx, differentEvaluation, cfg)
+	require.NoError(t, err)
+	require.Nil(t, reused)
+	for name, mutate := range map[string]func(*ActiveConfig){
+		"config version": func(changed *ActiveConfig) { changed.ConfigVersion++ },
+		"audit prompt":   func(changed *ActiveConfig) { changed.AuditPrompt += "\nchanged" },
+		"aggregation":    func(changed *ActiveConfig) { changed.AggregationStrategy = AggregationAllBlock },
+		"enabled models": func(changed *ActiveConfig) {
+			changed.Endpoints = append(changed.Endpoints, ActiveEndpoint{ID: "guard-2", Adapter: AdapterQwen3Guard, Enabled: true})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := cfg
+			mutate(&changed)
+			reused, lookupErr := repo.FindReusableResult(ctx, configSnapshot, changed)
+			require.NoError(t, lookupErr)
+			require.Nil(t, reused)
+		})
+	}
+}
+
+func TestPromptAuditPersistsAndReusesThirdPartySegmentResultsPerEndpoint(t *testing.T) {
+	db := openPromptAuditIntegrationDB(t)
+	repo := NewPostgreSQLRepository(db)
+	ctx := context.Background()
+	cfg := integrationConfig(1, true)
+	endpoint := ActiveEndpoint{ID: "third-guard", Adapter: AdapterOpenAICompatibleQwen, Model: "third-model", Enabled: true, TimeoutMS: 1000}
+	cfg.Endpoints = []ActiveEndpoint{endpoint}
+	segment := AuditSegment{
+		Order: 1, SourceRole: "user", PolicyRole: "user", TurnScope: "current",
+		Content: "segment input", ContentHash: promptAuditHash("segment input"),
+	}
+	key := buildSegmentReuseKey(segment, endpoint, cfg)
+
+	sourceSnapshot := integrationSnapshot("segment-source")
+	sourceSnapshot.EvaluationInputHash = hashEvaluationInput([]AuditSegment{segment})
+	sourceResult := integrationResult(EventPass)
+	sourceResult.ModelResults.Aggregation.EvaluationInputHash = sourceSnapshot.EvaluationInputHash
+	sourceResult.ModelResults.Models = []ModelAuditResult{{Sequence: 1, EndpointID: endpoint.ID, Adapter: endpoint.Adapter, Model: endpoint.Model}}
+	sourceResult.ModelResults.NewSegmentResults = []SegmentAuditResult{{
+		ReuseKey: key, SourceRole: segment.SourceRole, Model: endpoint.Model,
+		Decision: EventPass, Action: ActionAllow, Categories: []string{},
+	}}
+	sourceResult.ModelResults.SegmentUses = []SegmentResultUse{{
+		EndpointID: endpoint.ID, SegmentOrder: segment.Order, SourceRole: segment.SourceRole,
+		PolicyRole: segment.PolicyRole, TurnScope: segment.TurnScope, LookupKey: key.LookupKey,
+	}}
+	source, err := repo.RecordBlocking(ctx, sourceSnapshot, cfg, sourceResult)
+	require.NoError(t, err)
+	require.NotNil(t, source.Event)
+
+	found, err := repo.FindReusableSegments(ctx, []SegmentReuseKey{key})
+	require.NoError(t, err)
+	require.Contains(t, found, key.LookupKey)
+	require.NotZero(t, found[key.LookupKey].ID)
+
+	currentSnapshot := integrationSnapshot("segment-current")
+	currentSnapshot.PromptHash = strings.Repeat("x", 64)
+	currentSnapshot.EvaluationInputHash = hashEvaluationInput([]AuditSegment{segment})
+	currentResult := integrationResult(EventPass)
+	currentResult.ModelResults.Aggregation.EvaluationInputHash = currentSnapshot.EvaluationInputHash
+	currentResult.ModelResults.Models = sourceResult.ModelResults.Models
+	currentResult.ModelResults.SegmentUses = []SegmentResultUse{{
+		EndpointID: endpoint.ID, SegmentOrder: segment.Order, SourceRole: segment.SourceRole,
+		PolicyRole: segment.PolicyRole, TurnScope: segment.TurnScope, LookupKey: key.LookupKey,
+		SourceSegmentResultID: found[key.LookupKey].ID,
+	}}
+	current, err := repo.RecordBlocking(ctx, currentSnapshot, cfg, currentResult)
+	require.NoError(t, err)
+	require.NotNil(t, current.Event)
+
+	detail, err := repo.GetEvent(ctx, current.Event.ID)
+	require.NoError(t, err)
+	require.Len(t, detail.Segments, 1)
+	require.Equal(t, endpoint.ID, detail.Segments[0].EndpointID)
+	require.NotNil(t, detail.Segments[0].ReusedFromSegmentResultID)
+	require.Equal(t, found[key.LookupKey].ID, *detail.Segments[0].ReusedFromSegmentResultID)
 }
 
 func resetPromptAuditIntegrationDB(t *testing.T, db *sql.DB) {
@@ -94,7 +234,8 @@ func integrationSnapshot(seed string) PromptSnapshot {
 		UserEmailSnapshot: "user-" + seed + "@example.test", APIKeyNameSnapshot: "key-" + seed,
 		GroupName: "group-" + seed, Provider: "openai", Endpoint: "/v1/chat/completions",
 		Protocol: "openai_chat", Model: "gpt-test", PromptHash: strings.Repeat(seed[:1], 64),
-		RedactedPreview: "redacted-" + seed, PromptLength: len([]rune(seed)), MessageCount: 1,
+		EvaluationInputHash: strings.Repeat(seed[len(seed)-1:], 64),
+		RedactedPreview:     "redacted-" + seed, PromptLength: len([]rune(seed)), MessageCount: 1,
 	}
 }
 
@@ -109,7 +250,8 @@ func integrationResult(decision EventDecision) *NormalizedResult {
 			Aggregation: ModelAggregation{
 				Strategy: AggregationAnyBlock, EnabledModelCount: 1, BlockThreshold: 1,
 				ConfigVersion: 1, PromptContractVersion: PromptContractVersion,
-				AuditPromptHash: promptAuditHash(DefaultAuditPrompt),
+				AuditPromptHash: promptAuditHash(DefaultAuditPrompt), EvaluationInputHash: "",
+				EvaluationContractVersion: EvaluationContractVersion, RoleContractHash: currentRoleContractHash(),
 			},
 			Models: []ModelAuditResult{{Sequence: 1, EndpointID: "guard-1", Adapter: AdapterQwen3Guard}},
 		},
@@ -139,7 +281,10 @@ func TestPromptAuditMigrationSchemaAndLeakageGate(t *testing.T) {
 	ctx := context.Background()
 
 	rows, err := db.QueryContext(ctx, `SELECT table_name, column_name FROM information_schema.columns
-		WHERE table_schema='public' AND table_name IN ('prompt_audit_jobs','prompt_audit_events')`)
+		WHERE table_schema='public' AND table_name IN (
+			'prompt_audit_jobs','prompt_audit_events','prompt_audit_outcomes',
+			'prompt_audit_segment_results','prompt_audit_outcome_segments'
+		)`)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
 	forbidden := []string{"raw_prompt", "raw_request", "payload", "token", "authorization", "credential", "ciphertext"}
@@ -152,9 +297,22 @@ func TestPromptAuditMigrationSchemaAndLeakageGate(t *testing.T) {
 		}
 	}
 	require.NoError(t, rows.Err())
+	var reuseColumnCount int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='prompt_audit_outcomes'
+		  AND column_name='reused_from_outcome_id'`).Scan(&reuseColumnCount))
+	require.Equal(t, 1, reuseColumnCount)
+	var segmentContentColumnCount int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='prompt_audit_segment_results'
+		  AND column_name IN ('content','prompt','full_prompt')`).Scan(&segmentContentColumnCount))
+	require.Zero(t, segmentContentColumnCount)
 
 	indexRows, err := db.QueryContext(ctx, `SELECT indexname FROM pg_indexes
-		WHERE schemaname='public' AND tablename IN ('prompt_audit_jobs','prompt_audit_events')`)
+		WHERE schemaname='public' AND tablename IN (
+			'prompt_audit_jobs','prompt_audit_events','prompt_audit_outcomes',
+			'prompt_audit_segment_results','prompt_audit_outcome_segments'
+		)`)
 	require.NoError(t, err)
 	defer func() { _ = indexRows.Close() }()
 	indexes := map[string]bool{}
@@ -170,6 +328,9 @@ func TestPromptAuditMigrationSchemaAndLeakageGate(t *testing.T) {
 		"idx_prompt_audit_events_decision_created", "idx_prompt_audit_events_risk_created",
 		"idx_prompt_audit_events_user_created", "idx_prompt_audit_events_api_key_created",
 		"idx_prompt_audit_events_group_created", "idx_prompt_audit_events_prompt_hash", "idx_prompt_audit_events_created",
+		"idx_prompt_audit_outcomes_role_reuse_lookup", "idx_prompt_audit_outcomes_reused_from",
+		"idx_prompt_audit_segment_results_reuse", "idx_prompt_audit_segment_results_source",
+		"idx_prompt_audit_outcome_segments_source",
 	} {
 		require.Truef(t, indexes[name], "missing index %s", name)
 	}

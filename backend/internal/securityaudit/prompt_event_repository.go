@@ -107,6 +107,10 @@ func (r *PostgreSQLRepository) GetEvent(ctx context.Context, id int64) (*Event, 
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrEventNotFound
 	}
+	if err != nil {
+		return nil, err
+	}
+	event.Segments, err = r.loadEventSegments(ctx, event.ID)
 	return event, err
 }
 

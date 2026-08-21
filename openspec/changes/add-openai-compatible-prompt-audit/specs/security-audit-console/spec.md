@@ -40,6 +40,12 @@ EndpointPool SHALL 展示顺序、开关、名称、模型、adapter、timeout�
 - **WHEN** 管理员编辑节点
 - **THEN** adapter 文案 MUST 为“Qwen3Guard”或“第三方 OpenAI-compatible（Qwen 两行格式）”
 
+#### Scenario: 新增与编辑 adapter 默认值
+- **WHEN** 管理员新增模型
+- **THEN** adapter MUST 默认选择 openai_compatible_qwen
+- **WHEN** 管理员编辑已有模型
+- **THEN** adapter MUST 回显该模型已保存的有效值；旧数据缺失或无效时 MAY 回退 openai_compatible_qwen
+
 ### Requirement: 页面必须区分可编辑审核提示词与只读固定协议
 AuditPromptPanel SHALL 使用可编辑 textarea 绑定 audit_prompt，并使用不可编辑 pre/code 展示后端 prompt_contract.fixed_output_prompt。前端 MUST 不硬编码另一份固定协议。
 
@@ -111,12 +117,22 @@ RuntimeOverview SHALL 展示每模型顺序、启用状态、adapter/model、tim
 - **THEN** 页面 MUST 不再把 failover 作为模型执行说明
 
 ### Requirement: Event 详情必须展示每模型脱敏结果
-EventDetailDialog SHALL 展示完整管理员复核 Prompt、最终聚合摘要、风险摘要和 model_results。每模型行 MUST 包含 Safety、Categories、decision/action、latency、usage 与 error_code，但 MUST 不展示模型完整响应或 reasoning content。
+EventDetailDialog SHALL 展示完整管理员复核 Prompt、最终聚合摘要、风险摘要和 model_results。每模型行 MUST 包含输入模式、片段数/命中数/联合摘要、Safety、Categories、decision/action、latency、usage 与 error_code；技术信息还 SHALL 展示评估契约、完整/片段/联合调用数及必要的第三方片段来源，但 MUST 不展示模型完整响应或 reasoning content。
 
 #### Scenario: 部分模型失败
 - **WHEN** Event.model_results.aggregation.partial_failure=true
 - **THEN** 技术信息 MUST 明确标识部分失败、模型数和门槛
 - **THEN** 失败模型 MUST 展示稳定 error_code，成功模型仍展示分类
+
+#### Scenario: 复用历史结果
+- **WHEN** Event.model_results.aggregation.reused_from_outcome_id 有值
+- **THEN** 技术信息 MUST 展示来源 Outcome ID
+- **THEN** 页面 MUST 说明本次未重新调用任何审核模型，而不是展示空的每模型表格
+
+#### Scenario: 查看第三方片段来源
+- **WHEN** Event 包含第三方片段使用关系
+- **THEN** 页面 MUST 展示 endpoint、片段顺序、source_role、turn_scope、decision/action、categories
+- **THEN** 历史命中 MUST 标识原始片段结果 ID
 
 #### Scenario: 完整 Prompt 复核
 - **WHEN** Event 拥有 full_prompt

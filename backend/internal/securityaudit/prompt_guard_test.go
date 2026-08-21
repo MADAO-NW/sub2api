@@ -83,6 +83,38 @@ func TestGuardEvaluatorOrderedAllPartialFailureIsFailClosed(t *testing.T) {
 	require.Equal(t, int64(1), snapshotMetrics.Invalid)
 }
 
+func TestGuardEvaluatorReusesHistoricalResultWithoutCallingModel(t *testing.T) {
+	sourceOutcomeID := int64(77)
+	historical := integrationResult(EventCritical)
+	historical.ModelResults.Aggregation.ReusedFromOutcomeID = &sourceOutcomeID
+	repo := &fakeJobRepository{reusableResult: historical}
+	evaluator := newGuardEvaluator(nil, repo, NewAtomicMetrics(), 1, 1)
+
+	decision, err := evaluator.Evaluate(context.Background(), guardConfig(
+		ActiveEndpoint{ID: "guard", Enabled: true, TimeoutMS: 1000},
+	), PromptSnapshot{PromptHash: strings.Repeat("b", 64), ScanText: "repeated unsafe prompt", PromptLength: 22})
+	require.NoError(t, err)
+	require.Equal(t, DecisionBlock, decision.Kind)
+	require.False(t, decision.AllowNextStage)
+	require.Equal(t, 1, repo.reuseLookups)
+	require.Equal(t, 1, repo.recordBlockingCalls)
+	require.Equal(t, sourceOutcomeID, *repo.recordBlockingResult.ModelResults.Aggregation.ReusedFromOutcomeID)
+}
+
+func TestGuardEvaluatorFallsBackToModelWhenHistoricalLookupFails(t *testing.T) {
+	repo := &fakeJobRepository{reusableErr: errors.New("database lookup failed")}
+	scanner := &scriptedScanner{}
+	evaluator := newGuardEvaluator(scanner, repo, NewAtomicMetrics(), 1, 1)
+
+	decision, err := evaluator.Evaluate(context.Background(), guardConfig(
+		ActiveEndpoint{ID: "guard", Enabled: true, TimeoutMS: 1000},
+	), PromptSnapshot{PromptHash: strings.Repeat("c", 64), ScanText: "new prompt", PromptLength: 10})
+	require.NoError(t, err)
+	require.Equal(t, DecisionAllow, decision.Kind)
+	require.Equal(t, []string{"guard"}, scanner.calls)
+	require.Equal(t, 1, repo.reuseLookups)
+}
+
 func TestGuardEvaluatorGlobalBulkheadIsNonBlocking(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)

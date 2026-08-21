@@ -41,27 +41,28 @@ type Job struct {
 }
 
 type Event struct {
-	ID              int64              `json:"id"`
-	JobID           int64              `json:"job_id"`
-	Snapshot        PromptSnapshot     `json:"snapshot"`
-	Decision        EventDecision      `json:"decision"`
-	RiskLevel       RiskLevel          `json:"risk_level"`
-	Action          Action             `json:"action"`
-	Categories      []string           `json:"categories"`
-	MatchedScanners []string           `json:"matched_scanners"`
-	ScannerScores   map[string]float64 `json:"scanner_scores"`
-	ScannerEvidence map[string]string  `json:"scanner_evidence"`
-	ScannerBackend  string             `json:"scanner_backend"`
-	ScannerVersion  string             `json:"scanner_version"`
-	GuardEndpointID string             `json:"guard_endpoint_id"`
-	PolicyID        string             `json:"policy_id"`
-	PolicyVersion   int                `json:"policy_version"`
-	ConfigVersion   int64              `json:"config_version"`
-	ChunkTotal      int                `json:"chunk_total"`
-	LatencyMS       int                `json:"latency_ms"`
-	ModelResults    ModelResults       `json:"model_results"`
-	IssueSummaries  []IssueSummary     `json:"issue_summaries"`
-	CreatedAt       time.Time          `json:"created_at"`
+	ID              int64                      `json:"id"`
+	JobID           int64                      `json:"job_id"`
+	Snapshot        PromptSnapshot             `json:"snapshot"`
+	Decision        EventDecision              `json:"decision"`
+	RiskLevel       RiskLevel                  `json:"risk_level"`
+	Action          Action                     `json:"action"`
+	Categories      []string                   `json:"categories"`
+	MatchedScanners []string                   `json:"matched_scanners"`
+	ScannerScores   map[string]float64         `json:"scanner_scores"`
+	ScannerEvidence map[string]string          `json:"scanner_evidence"`
+	ScannerBackend  string                     `json:"scanner_backend"`
+	ScannerVersion  string                     `json:"scanner_version"`
+	GuardEndpointID string                     `json:"guard_endpoint_id"`
+	PolicyID        string                     `json:"policy_id"`
+	PolicyVersion   int                        `json:"policy_version"`
+	ConfigVersion   int64                      `json:"config_version"`
+	ChunkTotal      int                        `json:"chunk_total"`
+	LatencyMS       int                        `json:"latency_ms"`
+	ModelResults    ModelResults               `json:"model_results"`
+	Segments        []PromptAuditSegmentDetail `json:"segments,omitempty"`
+	IssueSummaries  []IssueSummary             `json:"issue_summaries"`
+	CreatedAt       time.Time                  `json:"created_at"`
 }
 
 type JobRepository interface {
@@ -70,6 +71,7 @@ type JobRepository interface {
 	MarkStagingFailed(ctx context.Context, jobID int64, code, message string) error
 	ClaimNextJob(ctx context.Context, now time.Time) (*Job, bool, error)
 	RefreshLease(ctx context.Context, jobID, claimVersion int64, now time.Time) error
+	FindReusableResult(ctx context.Context, snapshot PromptSnapshot, cfg ActiveConfig) (*NormalizedResult, error)
 	Complete(ctx context.Context, job *Job, result *NormalizedResult, cfg ActiveConfig) (*CompletionResult, error)
 	Retry(ctx context.Context, jobID, claimVersion int64, jobAttempt int, next time.Time, code, message string, attempts []ModelCallAttempt) error
 	Fail(ctx context.Context, jobID, claimVersion int64, jobAttempt int, code, message string, attempts []ModelCallAttempt) error
@@ -201,6 +203,9 @@ func (r *PostgreSQLRepository) Complete(ctx context.Context, job *Job, result *N
 	}
 	outcome, err := insertOutcome(ctx, tx, job, event, result)
 	if err != nil {
+		return nil, err
+	}
+	if err := persistSegmentEvaluation(ctx, tx, outcome.ID, result.ModelResults); err != nil {
 		return nil, err
 	}
 	disabledUserID, err := applyOutcomeEnforcement(ctx, tx, outcome, cfg)
@@ -375,6 +380,9 @@ func (r *PostgreSQLRepository) RecordBlocking(ctx context.Context, snapshot Prom
 	}
 	outcome, err := insertOutcome(ctx, tx, job, event, result)
 	if err != nil {
+		return nil, err
+	}
+	if err := persistSegmentEvaluation(ctx, tx, outcome.ID, result.ModelResults); err != nil {
 		return nil, err
 	}
 	disabledUserID, err := applyOutcomeEnforcement(ctx, tx, outcome, cfg)
@@ -639,6 +647,13 @@ func nullableID(value int64) any {
 }
 
 func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableInt64(value *int64) any {
 	if value == nil {
 		return nil
 	}

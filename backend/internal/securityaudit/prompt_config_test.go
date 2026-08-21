@@ -52,6 +52,12 @@ func TestDefaultConfigIsOff(t *testing.T) {
 	require.NotContains(t, string(storageJSON), "fixed_output_prompt")
 }
 
+func TestMissingEndpointAdapterDefaultsToThirdParty(t *testing.T) {
+	storage, err := ParseStorageConfig(`{"endpoints":[{"id":"legacy","name":"Legacy","protocol":"openai_compatible","base_url":"http://127.0.0.1:8000","model":"guard","timeout_ms":1000}]}`)
+	require.NoError(t, err)
+	require.Equal(t, AdapterOpenAICompatibleQwen, storage.Endpoints[0].Adapter)
+}
+
 func TestDefaultAuditPromptKeepsRiskBoundariesInBusinessPolicy(t *testing.T) {
 	policyMarker := "本策略在降低误杀的同时审核以下业务范围："
 	policyIndex := strings.Index(DefaultAuditPrompt, policyMarker)

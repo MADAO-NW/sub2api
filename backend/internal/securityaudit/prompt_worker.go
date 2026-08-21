@@ -176,31 +176,49 @@ func (r *Runner) processSafely(ctx context.Context, workerID int, cfg ActiveConf
 func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig, job *Job) error {
 	baseFields := jobLogFields(job)
 	LogInfo(EventAuditStarted, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "attempts": job.Attempts, "status": "processing"}))
-	scanText, err := r.payload.Get(ctx, job.ID)
+	payload, err := r.payload.Get(ctx, job.ID)
 	if err != nil {
 		return r.finishFailure(ctx, job, &GuardError{Code: "payload_missing", Retryable: false, Cause: err})
 	}
-	// The job row only carries redacted metadata; the full prompt for the audit
-	// event is reconstructed here from the transient scan payload.
-	job.Snapshot.FullPrompt = FullPromptFromScanText(scanText)
+	// Job 行只保存脱敏元数据，完整 Prompt 与角色边界由短生命周期 Payload 恢复。
+	if err := hydrateSnapshotFromPayload(&job.Snapshot, payload); err != nil {
+		return r.finishFailure(ctx, job, &GuardError{Code: "payload_invalid", Retryable: false, Cause: err})
+	}
 	endpoints := cfg.EnabledEndpoints()
 	if len(endpoints) == 0 {
 		return r.finishFailure(ctx, job, &GuardError{Code: "no_enabled_endpoint", Retryable: true})
 	}
 	started := r.clock.Now()
-	aggregated, err := runOrderedModels(
-		ctx,
-		cfg,
-		scanText,
-		r.clock,
-		r.metrics,
-		func(callCtx context.Context, _ ActiveEndpoint) error {
-			return r.repo.RefreshLease(callCtx, job.ID, job.ClaimVersion, r.clock.Now())
-		},
-		func(callCtx context.Context, request ModelScanRequest) (*NormalizedResult, error) {
-			return r.scanWithLeaseHeartbeat(ctx, callCtx, job, request)
-		},
-	)
+	resultSource := "model"
+	aggregated, lookupErr := r.repo.FindReusableResult(ctx, job.Snapshot, cfg)
+	if lookupErr != nil {
+		LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{
+			"worker_id": workerID, "status": "history_lookup_fallback", "error_code": "history_lookup_failed",
+		}))
+	}
+	if aggregated != nil {
+		resultSource = "history"
+	}
+	if aggregated == nil {
+		var segmentFinder SegmentResultFinder
+		if finder, ok := r.repo.(SegmentResultFinder); ok {
+			segmentFinder = finder
+		}
+		aggregated, err = runOrderedModels(
+			ctx,
+			cfg,
+			job.Snapshot,
+			r.clock,
+			r.metrics,
+			func(callCtx context.Context, _ ActiveEndpoint) error {
+				return r.repo.RefreshLease(callCtx, job.ID, job.ClaimVersion, r.clock.Now())
+			},
+			func(callCtx context.Context, request ModelScanRequest) (*NormalizedResult, error) {
+				return r.scanWithLeaseHeartbeat(ctx, callCtx, job, request)
+			},
+			segmentFinder,
+		)
+	}
 	if err != nil {
 		if errors.Is(err, ErrLeaseLost) {
 			return err
@@ -218,6 +236,8 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 		"block_threshold":     aggregated.ModelResults.Aggregation.BlockThreshold,
 		"partial_failure":     aggregated.ModelResults.Aggregation.PartialFailure,
 		"latency_ms":          aggregated.LatencyMS, "guard_endpoint_id": aggregated.GuardEndpointID, "status": "completed",
+		"result_source":          resultSource,
+		"reused_from_outcome_id": pointerLogID(aggregated.ModelResults.Aggregation.ReusedFromOutcomeID),
 	}))
 	completion, err := r.repo.Complete(ctx, job, aggregated, cfg)
 	if err != nil {

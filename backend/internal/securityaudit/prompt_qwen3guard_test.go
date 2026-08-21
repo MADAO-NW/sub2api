@@ -61,6 +61,24 @@ func TestParseQwen3GuardStrictAndPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildGuardPayloadAppliesRolePromptOnlyToThirdParty(t *testing.T) {
+	third, err := buildGuardPayload(ModelScanRequest{
+		Endpoint:    ActiveEndpoint{Adapter: AdapterOpenAICompatibleQwen, Model: "third"},
+		FullPrompt:  `{"source_role":"user","content":"hello"}`,
+		AuditPrompt: "audit policy", RolePrompt: "role rule",
+	}, "")
+	require.NoError(t, err)
+	thirdMessages := third["messages"].([]map[string]string)
+	require.Equal(t, "audit policy\n\nrole rule\n\n"+FixedOutputPrompt, thirdMessages[0]["content"])
+
+	qwen, err := buildGuardPayload(ModelScanRequest{
+		Endpoint:   ActiveEndpoint{Adapter: AdapterQwen3Guard, Model: "qwen"},
+		FullPrompt: "complete prompt", AuditPrompt: "ignored", RolePrompt: "ignored",
+	}, "")
+	require.NoError(t, err)
+	require.Equal(t, []map[string]string{{"role": "user", "content": "complete prompt"}}, qwen["messages"])
+}
+
 func TestParseQwen3GuardCanonicalizesCategoryOrder(t *testing.T) {
 	result, err := ParseQwen3Guard(
 		"Safety: Unsafe\nCategories: Copyright Violation, Unethical Acts",

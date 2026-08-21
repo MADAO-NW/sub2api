@@ -288,6 +288,9 @@ func buildGuardPayload(scanRequest ModelScanRequest, repairCode string) (map[str
 			return nil, &GuardError{Code: ErrorCodeUnavailable, DetailCode: "audit_prompt_required"}
 		}
 		systemPrompt := scanRequest.AuditPrompt
+		if strings.TrimSpace(scanRequest.RolePrompt) != "" {
+			systemPrompt += "\n\n" + scanRequest.RolePrompt
+		}
 		if repairCode != "" {
 			systemPrompt += "\n\n" + fmt.Sprintf(FormatRepairPrompt, repairCode)
 		}
