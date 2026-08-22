@@ -24,8 +24,9 @@ Endpoint SHALL 支持 qwen3guard 和 openai_compatible_qwen 两类 adapter，并
 #### Scenario: 调用第三方模型
 - **WHEN** endpoint.adapter=openai_compatible_qwen
 - **THEN** 请求 MUST 只发送一条 system 和一条 user
-- **THEN** system MUST 严格等于 audit_prompt、两个换行、后端固定输出协议
+- **THEN** system MUST 按顺序包含 audit_prompt、后端固定角色规则或联合规则、可选纠格式提示、后端固定输出协议
 - **THEN** 固定协议之后 MUST NOT 有动态文本
+- **THEN** user MUST 为后端生成的带 source_role、turn_scope 和正文的片段或联合审核 JSON
 - **THEN** 请求 MUST NOT 发送 seed、max_tokens、max_completion_tokens、thinking、reasoning_effort 或 response_format
 
 #### Scenario: 第三方协议纠格式重试
@@ -92,18 +93,46 @@ parser SHALL 只接受第一行精确 Safety 标签和值，以及第二行精�
 - **WHEN** 任一规则开启
 - **THEN** notifications.admin_email MUST 非空且格式有效
 
-### Requirement: 每个启用模型必须接收相同完整 Prompt
-系统 SHALL 复用现有 PromptSnapshot 协议提取和最新 user 前置规则，但模型调用 MUST 不分片、不静默截断、不调用 tokenizer，并 MUST 向每个启用模型发送相同完整文本。
+### Requirement: Qwen 必须继续审核一次现有完整 Prompt
+系统 SHALL 复用现有 PromptSnapshot 的 ScanText、FullPrompt、PromptHash 和最新 user 前置规则。qwen3guard endpoint MUST 对 BlockingLatestTurnOnly 选定范围的现有完整文本只调用一次，不得按角色包装、拆分或查询片段历史。
 
 #### Scenario: 长文本超过 Event 快照上限
 - **WHEN** scanText 长于 Event full_prompt 的存储上限
 - **THEN** Event MAY 按既有边界保存快照
-- **THEN** 每个模型仍 MUST 接收完整 scanText
+- **THEN** Qwen MUST 仍接收完整 scanText
+
+#### Scenario: BlockingLatestTurnOnly 默认与窄范围
+- **WHEN** blocking_latest_turn_only=false 或未配置
+- **THEN** blocking 与 async MUST 审核完整请求范围
+- **WHEN** blocking_latest_turn_only=true 且存在 user 文本
+- **THEN** blocking MUST 只保留最后连续 user 与其之前最近连续 assistant/model
+- **WHEN** 请求没有 user 文本
+- **THEN** blocking MUST 回退完整范围
+- **THEN** async MUST 始终审核完整请求
+
+### Requirement: 第三方模型必须按可信角色片段审核并形成一票
+系统 SHALL 从同一协议提取结果保留 source_role、逻辑消息原始顺序和 turn_scope。只有 openai_compatible_qwen SHALL 按角色片段审核；正文角色声明 MUST NOT 覆盖网关确定的角色。每个第三方 endpoint 最终 MUST 只形成一个模型级结果和一票。
+
+#### Scenario: 所有片段 Pass
+- **WHEN** 某第三方 endpoint 的全部角色片段结果均为 Pass/Allow
+- **THEN** 该 endpoint MUST 直接形成 Pass/Allow
+- **THEN** 系统 MUST NOT 执行联合审核
+
+#### Scenario: 片段风险需要联合审核
+- **WHEN** 直接影响当前任务的片段没有 Critical，但任一直接片段为 Flag，或任一上下文片段非 Pass
+- **THEN** 同一 endpoint MUST 对直接影响片段和非 Pass 上下文最多执行一次联合审核
+- **THEN** 联合结果 MUST 成为该 endpoint 的唯一模型级结果
+
+#### Scenario: 直接影响片段 Critical
+- **WHEN** 当前生效 system/developer 或当前 user 片段为 Critical/Block
+- **THEN** 该 endpoint MUST 直接形成 Critical/Block
+- **THEN** 联合审核 MUST NOT 降低该结论
 
 #### Scenario: 前序模型已阻断或失败
 - **WHEN** 某模型 Block、已达到聚合门槛、error 或 timeout
 - **THEN** 后续启用模型仍 MUST 按顺序执行
-- **THEN** 每个模型在当前 attempt 中 MUST 最多调用一次
+- **THEN** Qwen 在当前 attempt 中 MUST 最多调用一次
+- **THEN** 每个第三方 endpoint 的每个唯一片段键 MUST 最多调用一次，并最多追加一次联合审核
 
 ### Requirement: 模型 timeout 与异步租约必须相互独立
 每个 endpoint.timeout_ms SHALL 只控制该模型的一次调用。异步 Worker MUST 在每个模型调用前以 Job ID、processing 状态和 claim_version 刷新租约，并在单次调用持续期间以短于 processing 回收窗口的固定间隔继续刷新。
@@ -143,7 +172,7 @@ parser SHALL 只接受第一行精确 Safety 标签和值，以及第二行精�
 - **THEN** 异步 Job MUST 进入现有 retry/failed
 
 ### Requirement: 异步任务必须可靠保存临时完整载荷
-系统 SHALL 继续使用 PostgreSQL Job 与 Redis Payload，并采用 staging→SET→queued 发布。Payload TTL MUST 按模型 timeout 总和、attempt、退避和安全余量动态计算；短于既有 30 分钟默认值时使用 30 分钟，且不得以硬上限导致最大重试周期内提前过期。
+系统 SHALL 继续使用 PostgreSQL Job 与 Redis Payload，并采用 staging→SET→queued 发布。新 Payload MUST 版本化保存角色、逻辑消息顺序和正文，Worker MUST 能消费旧纯文本 Payload 并按整份模式处理。Payload TTL MUST 按 Qwen 一次及第三方片段数加最多一次联合审核的 timeout 总和、attempt、退避和安全余量动态计算；短于既有 30 分钟默认值时使用 30 分钟，且不得以硬上限导致最大重试周期内提前过期。
 
 #### Scenario: Redis 写入失败
 - **WHEN** staging Job 已创建但 Payload SET 失败
@@ -177,6 +206,46 @@ parser SHALL 只接受第一行精确 Safety 标签和值，以及第二行精�
 - **WHEN** Outcome.decision=critical 且 action=Block
 - **THEN** is_violation MUST 为 true
 - **THEN** 其他所有组合 MUST 为 false
+
+### Requirement: 完整历史结果必须按冻结配置复用
+系统 SHALL 在 blocking 与 async 模型调用前查询全站历史 Outcome。只有 prompt_hash、evaluation_input_hash、evaluation_contract_version、role_contract_hash、配置版本、审核提示词 Hash、固定协议版本、聚合策略、启用模型数和阻断门槛全部一致，且来源为非 partial_failure 的原始 pass、flag 或 critical 完整结果时才允许复用。
+
+#### Scenario: 命中历史完整结果
+- **WHEN** 当前 Prompt 和冻结配置命中可复用 Outcome
+- **THEN** 系统 MUST 不调用任何审核模型
+- **THEN** 系统 MUST 仍为当前请求创建 Job、Outcome 和按配置可选的 Event
+- **THEN** 当前 Outcome.reused_from_outcome_id MUST 指向原始模型评估 Outcome
+- **THEN** 当前用户的邮件、累计停用和鉴权缓存失效 MUST 正常执行
+
+#### Scenario: 历史结果不可复用或查询失败
+- **WHEN** 历史结果失败、partial_failure、已经来自历史复用或冻结配置不一致
+- **THEN** 系统 MUST 正常执行 Qwen 完整审核与第三方角色片段审核
+- **WHEN** 历史查询自身失败
+- **THEN** 系统 MUST 记录稳定回退日志并继续正常模型评估
+
+### Requirement: 第三方片段结果必须按 endpoint 和审核契约复用
+完整 Outcome 未命中时，系统 SHALL 一次批量查询全部第三方 endpoint 的唯一片段键。匹配 MUST 包含正文 Hash、policy role、turn scope、endpoint/adapter、config version、审核提示词 Hash、角色提示词 Hash、评估契约版本和固定协议版本；不同 endpoint MUST NOT 共享结果。Qwen 和联合审核结果 MUST NOT 进入片段缓存。
+
+#### Scenario: 片段历史命中
+- **WHEN** 某第三方 endpoint 的片段键命中原始成功分类
+- **THEN** 系统 MUST 跳过该 endpoint 的该片段调用
+- **THEN** 必要使用关系 MUST 直接指向原始片段结果 ID
+- **THEN** 系统 MUST NOT 以复用结果再创建片段复用链
+
+#### Scenario: 片段查询失败
+- **WHEN** 片段批量历史查询失败
+- **THEN** 系统 MUST 记录稳定回退日志并把全部片段视为未命中
+- **THEN** blocking fail-closed 与最终聚合语义 MUST NOT 改变
+
+### Requirement: 最终聚合必须始终以 endpoint 为投票粒度
+Qwen 完整结果和每个第三方 endpoint 汇总结果 SHALL 各占一票，片段数量和历史命中数量 MUST NOT 改变权重。最终结果 MUST 继续使用 any_block、majority_block 或 all_block 的现有冻结分母与门槛。
+
+#### Scenario: 第三方全部 Pass 但 Qwen Flag 或 Critical
+- **WHEN** 所有第三方 endpoint 均 Pass 且 Qwen 返回 Flag/Warn
+- **THEN** 三种策略的最终结果 MUST 为 Flag/Warn
+- **WHEN** 所有第三方 endpoint 均 Pass 且 Qwen 返回 Critical/Block
+- **THEN** any_block MUST 为 Critical/Block
+- **THEN** majority_block 与 all_block MUST 按现有门槛处理，未达门槛时为 Flag/Warn
 
 ### Requirement: Event 必须保存每模型脱敏明细
 prompt_audit_events SHALL 保存可选 full_prompt 和 model_results。model_results MUST 包含冻结聚合元数据及每模型 sequence、endpoint_id、adapter、model、Safety、Categories、decision/action、latency、可选 usage 和稳定 error_code。

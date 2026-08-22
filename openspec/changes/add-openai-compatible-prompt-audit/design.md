@@ -22,7 +22,8 @@ sub2api 已有独立的 Content Moderation 能力。Prompt Audit 继续位于 ba
 ### Goals
 
 - Qwen3Guard 与第三方 OpenAI-compatible 模型统一输出严格两行 Qwen 协议。
-- 所有启用模型按配置数组顺序逐一执行，每个模型接收同一完整 Prompt。
+- 所有启用 endpoint 按配置数组顺序逐一执行：Qwen3Guard 接收现有完整 Prompt 一次，第三方模型按可信角色片段审核并在必要时联合审核。
+- 支持完整 Outcome 复用，以及第三方 endpoint 内按角色、轮次和审核契约复用原始片段结果。
 - 支持任一阻断、多数阻断、全体阻断三种确定性聚合。
 - 保存每模型脱敏结果、独立成功分类流水、用户处置状态和动作 Outbox。
 - 支持最近窗口邮件提醒、累计自动停用和单账号重新启用时计数重置。
@@ -35,7 +36,7 @@ sub2api 已有独立的 Content Moderation 能力。Prompt Audit 继续位于 ba
 - 不增加 tokenizer、tokenizer assets、模型 /tokenize 调用或固定字符分片。
 - 不保存模型完整响应、reasoning content、审核模型 Token 或 Base URL。
 - 不实现人工审批、申诉、批量账号恢复或 Event 详情中的计数重置入口。
-- 不改变 PromptSnapshot 各协议文本提取和最新 user 前置规则。
+- 不改变现有 ScanText、FullPrompt、PromptHash 和最新 user 前置语义；仅从同一协议提取结果额外保留角色、逻辑消息顺序和轮次范围。
 - 不重构现有 Content Moderation 或网关协议 envelope。
 
 ## 1. 统一模型协议
@@ -63,15 +64,15 @@ GET config 返回 prompt_contract.version 与 prompt_contract.fixed_output_promp
 
 audit_prompt 是管理员可编辑的完整业务政策，默认值由后端提供。存在启用的 openai_compatible_qwen 时不能为空。
 
-第三方 system message 严格等于：
+第三方 system message 严格按以下顺序组成：
 
-管理员审核提示词 + 两个换行 + 后端固定输出协议
+管理员审核提示词 + 两个换行 + 后端固定角色规则（或联合审核规则）+ 可选纠格式提示 + 后端固定输出协议
 
-固定协议必须位于最后，之后不得追加动态文本。客户端 system、developer、instructions、assistant 和 tool 内容都只能作为一条普通 user message 的数据，不能取得可信 system 权限。
+固定协议必须位于最后，之后不得追加动态文本。角色由网关根据请求结构确定，正文中的角色声明不能覆盖它；被审正文始终只放在普通 user message 中，不能取得审核模型的可信 system 权限。
 
 第三方模型首次返回 HTTP 2xx 但 envelope、content 或两行协议无效时，允许在同一个 endpoint timeout 内执行一次纠格式重试。纠格式提示由后端固定模板和稳定错误码组成，放在 audit_prompt 与固定输出协议之间；固定协议仍是 system 最后一段。第二次成功按有效分类处理，第二次失败不再立即重试。
 
-Qwen3Guard 请求只发送一条 user message，并发送 seed=42。第三方请求只发送一条 system 和一条 user，不发送 seed。两类请求都使用 temperature=0、stream=false，不发送 max_tokens、max_completion_tokens、thinking、reasoning_effort 或 response_format，由供应商和模型使用自身默认生成上限。
+Qwen3Guard 请求继续只发送一条包含现有完整 Prompt 的 user message，并发送 seed=42，不增加角色 JSON 或角色提示。第三方每次片段/联合请求只发送一条 system 和一条 user，不发送 seed。两类请求都使用 temperature=0、stream=false，不发送 max_tokens、max_completion_tokens、thinking、reasoning_effort 或 response_format，由供应商和模型使用自身默认生成上限。
 
 ### 1.4 严格 parser
 
@@ -121,17 +122,18 @@ setting key 仍为 prompt_audit_config，并继续使用版本 CAS、SecretEncry
 
 邮件规则的开关、N 或 M 变化时，后端递增 rule_revision；其他配置变化不修改该修订号。
 
-## 3. 文本与顺序执行
+## 3. 文本、角色片段与顺序执行
 
-PromptSnapshot 的协议提取保持既有行为：
+PromptSnapshot 继续按既有规则生成 ScanText、FullPrompt 和 PromptHash：
 
 - 提取所有已支持协议的客户端可控文本。
 - 最新非空 user 前置，其余内容保持确定顺序。
-- 丢弃 role、source、segment ID 和 JSON 包装。
 - scanText、metadataText 和 SHA-256 基于同一完整字符串。
 - 图片二进制、base64 和远程图片内容不进入审核文本。
 
-Event 的 full_prompt 可按既有 Event 快照上限保存；该存储上限不得影响模型输入。每个启用模型接收相同、完整、未分片、未静默截断的 fullPrompt。模型上下文不足时记录稳定错误并继续后续模型。
+在不改变上述整份快照语义的前提下，同一提取流程额外保留 source_role、逻辑消息原始顺序和 turn_scope，并把同一逻辑消息的多个文本块合并为一个 AuditSegment。system/developer 为 active；最后连续 user 轮次为 current，更早 user 为 historical；assistant/model/tool 根据其与最后 user 的位置标记 current 或 historical。`BlockingLatestTurnOnly` 保留且默认 false；显式为 true 时，同步审核只选择最后连续 user 与其之前最近连续 assistant/model，无 user 时回退完整范围，异步始终审核完整请求。
+
+Event 的 full_prompt 可按既有 Event 快照上限保存；该存储上限不得影响模型输入。Qwen3Guard 对选定范围的完整、未分片、未静默截断 Prompt 审核一次。每个第三方 endpoint 按片段原顺序审核其未命中缓存的角色片段；所有片段均 Pass 时该 endpoint 直接 Pass，不执行联合审核。若直接影响当前任务的片段为 Critical，该 endpoint 直接 Critical；其余存在风险片段时，同一 endpoint 对直接影响片段与非 Pass 上下文执行一次联合审核。一个第三方 endpoint 无论包含多少片段，最终只形成一个模型级结果和一票。
 
 一次 attempt 冻结：
 
@@ -145,7 +147,7 @@ Event 的 full_prompt 可按既有 Event 快照上限保存；该存储上限不
 1. 依次遍历所有启用模型。
 2. 每个模型创建独立 timeout context。
 3. Block、已达到门槛、error 或 timeout 后仍继续后续模型。
-4. 每个模型在一个 attempt 中最多调用一次。
+4. Qwen endpoint 在一个 attempt 中只调用一次；第三方 endpoint 对每个唯一未命中片段最多调用一次，并在规则触发时最多追加一次联合审核。
 5. 异步 Worker 在每次模型调用前刷新 Job 租约；claim_version 失效立即停止。
 6. 只有任务取消、Shutdown 或租约失效可以中断剩余模型。
 
@@ -191,7 +193,7 @@ timeout、所有启用模型之和、最大尝试次数、退避和安全余量�
 
 ## 6. 数据模型与隐私边界
 
-181_prompt_audit.sql 和 182_prompt_audit_full_prompt.sql 是 checksum 不可变的历史迁移；full_prompt 继续由 182 提供。尚未发布的 224_prompt_audit_enforcement.sql 一次性增加多模型结果、成功分类流水、处置状态、动作 Outbox 和失败模型调用诊断表，不回填历史数据。
+181_prompt_audit.sql 和 182_prompt_audit_full_prompt.sql 是 checksum 不可变的历史迁移；full_prompt 继续由 182 提供。224_prompt_audit_enforcement.sql 一次性增加多模型结果、成功分类流水、处置状态、动作 Outbox 和失败模型调用诊断表，不回填历史数据。229_prompt_audit_result_reuse.sql 为 Outcome 增加历史复用与评估契约字段，并新增第三方片段原始结果表、Outcome 片段使用关系表及索引。
 
 ### 6.1 Job 与 Event
 
@@ -199,8 +201,8 @@ prompt_audit_jobs 保存任务状态、脱敏快照和 claim_version，不保存
 
 prompt_audit_events 保存可选管理员复核事件，包括 full_prompt 和 model_results：
 
-- aggregation：strategy、enabled_model_count、block_threshold、config_version、prompt_contract_version、audit_prompt_hash、partial_failure。
-- models[]：sequence、endpoint_id、adapter、model、Safety、Categories、平台 decision/action、latency、可选 usage、稳定 error_code。
+- aggregation：strategy、enabled_model_count、block_threshold、config_version、prompt_contract_version、audit_prompt_hash、partial_failure、评估输入/角色契约 Hash、完整/片段/联合调用数、片段命中数，以及完整历史命中时的 reused_from_outcome_id。
+- models[]：sequence、endpoint_id、adapter、model、input_mode、片段数/命中数/联合审核、Safety、Categories、平台 decision/action、latency、可选 usage、稳定 error_code。
 
 model_results 不保存模型完整响应、reasoning content、Token、Base URL 或管理员审核提示词。
 
@@ -213,6 +215,12 @@ prompt_audit_model_attempts 保存所有失败模型调用的节点、模型、�
 每个成功分类 Job 恰好写一条 prompt_audit_outcomes，以 job_id 唯一。它是邮件窗口和累计停用的唯一计数事实源。
 
 Outcome 只保存轻量分类事实和冻结聚合元数据，不保存 Prompt、预览、审核提示词、凭据或模型完整响应。store_pass_events=false 时 Pass 没有 Event，但仍必须有 Outcome；全部模型失败时不得写 Outcome。Event/Job 删除不影响 Outcome。若审核完成前用户已物理删除，Job/Event/Outcome 的 user_id 置空并保留身份快照与 Outcome，不创建 State 或 Action。
+
+提取 Prompt 后，blocking 与 async 共用全站 Outcome 历史查询。只有 prompt_hash、evaluation_input_hash、evaluation_contract_version、role_contract_hash、config_version、audit_prompt_hash、prompt_contract_version、aggregation_strategy、enabled_model_count 和 block_threshold 全部匹配，且原 Outcome 是非 partial_failure 的 pass/flag/critical 完整结果时才允许复用。复用跳过本次全部审核模型调用；当前请求仍创建新的 Job、Outcome 和可选 Event，并按当前用户执行邮件、累计停用和鉴权缓存失效。新 Outcome 的 reused_from_outcome_id 直接指向原始模型评估 Outcome，历史复用结果本身不得再次作为来源，避免形成复用链。
+
+历史查询失败时按缓存未命中处理并回退到正常模型评估，不得改变 blocking 的 fail-closed 语义。配置版本、审核提示词、固定协议、聚合策略、启用模型数或门槛变化都会使历史结果失效。
+
+完整 Outcome 未命中时，仅 openai_compatible_qwen 使用片段历史。系统必须先按 endpoint 批量查询全部唯一片段键；键包含正文 Hash、policy role、turn scope、endpoint/adapter、config version、审核提示词 Hash、角色提示词 Hash、评估契约版本和固定协议版本。命中只跳过该 endpoint 的该片段调用，不跨 endpoint 共享；Qwen 不查写片段缓存。联合审核结果不进入片段结果表。当前 Outcome 仅为直接影响结论、非 Pass 上下文或参与联合审核的片段记录使用关系，并始终直接指向原始片段结果，禁止复用链。
 
 违规的唯一定义是 decision=critical 且 action=Block。
 
@@ -292,7 +300,7 @@ Probe：
 
 运行态增加每模型顺序/开关/probe、请求和分类数、错误、usage、P50/P95；整条顺序审核 P50/P95、partial failure；聚合策略、模型快照数、门槛、协议版本、audit prompt hash；Outcome、违规、提醒、停用和邮件失败统计。
 
-Event 详情展示每模型 Safety、Categories、decision/action、latency、usage 和 error_code，不展示模型完整响应。full_prompt 仅供管理员敏感复核。
+Event 详情展示每模型 Safety、Categories、decision/action、latency、usage、error_code、输入模式、片段命中和联合审核摘要，并展示必要的第三方片段结果及历史来源；不展示模型完整响应。历史完整复用事件显示来源 Outcome ID，并说明本次未调用审核模型。full_prompt 仅供管理员敏感复核。
 
 ## 10. 网关与协议错误
 
@@ -304,7 +312,7 @@ Responses WebSocket 首轮和后续每个 response.create 都独立检查，Bloc
 
 ## 11. 可观测性
 
-日志只允许稳定 ID、配置/聚合数值、decision/action、latency、状态和稳定错误码。input_limit、分片正文、Prompt、audit_prompt、固定协议全文、Token、Authorization、完整 Base URL/query 和模型完整返回禁止进入日志。
+日志只允许稳定 ID、配置/聚合数值、decision/action、latency、结果来源、历史 Outcome ID、状态和稳定错误码。input_limit、分片正文、Prompt、audit_prompt、固定协议全文、Token、Authorization、完整 Base URL/query 和模型完整返回禁止进入日志。
 
 运行指标同时保留网关 Guard 总体指标，并新增：
 

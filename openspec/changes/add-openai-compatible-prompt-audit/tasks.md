@@ -201,3 +201,14 @@
 - [x] 16.1 将审计池改为紧凑、响应式的节点列表，修复开关与节点名称拥挤并强化状态、限制和操作层级
 - [x] 16.2 回归 Prompt Audit 前端组件测试、类型检查和生产构建
 - [x] 16.3 在 deploy 目录按现有 Compose 配置重建镜像、重启容器并验证页面和节点探测
+
+## 17. 分角色审核与历史复用
+
+- [x] 17.1 保持 Qwen 使用现有完整 Prompt 审核一次，并从协议提取结果额外保留角色、逻辑消息顺序和轮次范围
+- [x] 17.2 实现第三方 endpoint 片段批量命中、未命中审核、全 Pass 短路、直接 Critical 和必要联合审核
+- [x] 17.3 保持每个 endpoint 一票，并回归 Qwen Flag/Critical 与第三方 Pass 的三种聚合策略
+- [x] 17.4 实现评估契约完整 Outcome 复用、第三方原始片段结果和必要使用关系持久化
+- [x] 17.5 保留 BlockingLatestTurnOnly 默认 false，以及 true 时最新连续 user 加最近连续 assistant/model 的兼容范围
+- [x] 17.6 将新增/缺失 adapter 默认值改为第三方，编辑已有合法 adapter 时保持原值
+- [x] 17.7 同步事件详情、双语文案、设计、实施指导和 delta spec，并通过 Go/前端单元测试、类型检查及生产构建
+- [ ] 17.8 在配置 PROMPT_AUDIT_TEST_POSTGRES_DSN 的 PostgreSQL 环境执行 229 幂等迁移与片段持久化集成测试

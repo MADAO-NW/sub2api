@@ -91,6 +91,7 @@ describe('Prompt Audit components', () => {
     const edit = wrapper.findAll('button').find((button) => button.text().includes('common.edit'))
     expect(edit).toBeTruthy()
     await edit!.trigger('click')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="admin.promptAudit.pool.adapter"]').element.value).toBe('qwen3guard')
     const token = wrapper.get<HTMLInputElement>('[aria-label="admin.promptAudit.pool.apiKey"]')
     expect(token.element.value).toBe('')
     expect(token.attributes('placeholder')).toContain('admin.promptAudit.pool.keepSecret')
@@ -104,6 +105,26 @@ describe('Prompt Audit components', () => {
     const probe = wrapper.findAll('button').find((button) => button.text().includes('admin.promptAudit.pool.probe'))
     await probe!.trigger('click')
     expect(wrapper.emitted('probe')?.[0]?.[0]).toMatchObject({ id: 'guard-1' })
+  })
+
+  it('opens newly added models with the third-party adapter selected', async () => {
+    const wrapper = mount(EndpointPool, {
+      props: { endpoints: [endpoint()], probeResults: {}, probingIds: [] },
+      global: { stubs: { BaseDialog: DialogStub } },
+    })
+    await wrapper.get('[data-test="add-endpoint"]').trigger('click')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="admin.promptAudit.pool.adapter"]').element.value).toBe('openai_compatible_qwen')
+  })
+
+  it('falls back to the third-party adapter only when an edited model has no valid adapter', async () => {
+    const legacy = { ...endpoint(), adapter: '' } as unknown as PromptAuditEndpointDraft
+    const wrapper = mount(EndpointPool, {
+      props: { endpoints: [legacy], probeResults: {}, probingIds: [] },
+      global: { stubs: { BaseDialog: DialogStub } },
+    })
+    const edit = wrapper.findAll('button').find((button) => button.text().includes('common.edit'))
+    await edit!.trigger('click')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="admin.promptAudit.pool.adapter"]').element.value).toBe('openai_compatible_qwen')
   })
 
   it('surfaces an undecryptable saved credential and prompts for re-entry', async () => {
@@ -325,6 +346,10 @@ describe('Prompt Audit components', () => {
       scanner_backend: 'qwen3guard-openai', scanner_version: 'qwen3guard', guard_endpoint_id: 'guard-1',
       policy_id: 'ordered_all', policy_version: 1, config_version: 1, chunk_total: 1, latency_ms: 12,
       model_results: modelResults(),
+      segments: [{
+        endpoint_id: 'guard-1', segment_order: 1, source_role: 'user', policy_role: 'user', turn_scope: 'current',
+        source_segment_result_id: 9, reused_from_segment_result_id: 7, decision: 'critical', action: 'Block', categories: ['pii'],
+      }],
       issue_summaries: [{
         category: 'sexual_content_or_sexual_acts', scanner_id: 'sexual_content_or_sexual_acts',
         title: '性内容或性行为', description: 'Sexual content or sexual acts', severity: 'critical',
@@ -366,6 +391,7 @@ describe('Prompt Audit components', () => {
     expect(wrapper.text()).toContain('PII')
     expect(wrapper.text()).toContain('qwen-two-line-v1')
     expect(wrapper.get('[data-test="model-usage"]').text()).toBe('12/8/0')
+    expect(wrapper.get('[data-test="segment-result"]').text()).toContain('admin.promptAudit.events.technical.historySegment #7')
   })
 
   it('falls back to the redacted preview for events stored before full prompts were kept', async () => {
@@ -391,5 +417,37 @@ describe('Prompt Audit components', () => {
     const riskTab = wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes('admin.promptAudit.events.tabs.risks'))
     await riskTab!.trigger('click')
     expect(wrapper.get('[data-test="risk-prompt-full"]').text()).toContain('legacy redacted preview')
+  })
+
+  it('shows the historical outcome source without an empty model table', async () => {
+    const event: PromptAuditEvent = {
+      id: 3, job_id: 3, decision: 'critical', risk_level: 'critical', action: 'Block',
+      categories: ['pii'], matched_scanners: ['pii'], scanner_scores: {}, scanner_evidence: {},
+      scanner_backend: 'history-reuse', scanner_version: 'qwen-two-line-v1', guard_endpoint_id: '',
+      policy_id: 'any_block', policy_version: 1, config_version: 2, chunk_total: 1, latency_ms: 0,
+      model_results: {
+        ...modelResults(),
+        aggregation: { ...modelResults().aggregation, reused_from_outcome_id: 42 },
+        models: [],
+      },
+      issue_summaries: [], created_at: '2026-08-21T00:00:00Z',
+      snapshot: {
+        request_id: 'req-history', user_id: 1, username: 'alice', user_email: 'alice@example.test',
+        api_key_id: 2, api_key_name: 'alice-key', group_id: 3, group_name: 'Alpha', provider: 'openai',
+        endpoint: '/v1/chat/completions', protocol: 'openai_chat', model: 'gpt-test',
+        prompt_hash: 'c'.repeat(64), redacted_preview: 'repeated prompt', full_prompt: 'repeated prompt',
+        prompt_length: 15, message_count: 1, stage: 'http',
+      },
+    }
+    const wrapper = mount(EventDetailDialog, {
+      props: { show: true, event, loading: false },
+      global: { stubs: { BaseDialog: DialogStub } },
+    })
+    const technicalTab = wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes('admin.promptAudit.events.tabs.technical'))
+    await technicalTab!.trigger('click')
+
+    expect(wrapper.get('[data-test="history-result-source"]').text()).toContain('42')
+    expect(wrapper.get('[data-test="history-model-results"]').exists()).toBe(true)
+    expect(wrapper.find('table').exists()).toBe(false)
   })
 })

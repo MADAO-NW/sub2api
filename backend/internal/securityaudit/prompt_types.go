@@ -21,6 +21,8 @@ const (
 	ErrorCodeRequiresEnabled       = "prompt_guard_requires_audit_enabled"
 
 	DefaultGuardModel = "sileader/qwen3guard:0.6b"
+
+	EvaluationContractVersion = "qwen-whole-thirdparty-role-v1"
 )
 
 type Mode string
@@ -93,31 +95,52 @@ func (r Request) Clone() Request {
 }
 
 type PromptSnapshot struct {
-	RequestID          string `json:"request_id"`
-	UserID             int64  `json:"user_id"`
-	UsernameSnapshot   string `json:"username"`
-	UserEmailSnapshot  string `json:"user_email"`
-	APIKeyID           int64  `json:"api_key_id"`
-	APIKeyNameSnapshot string `json:"api_key_name"`
-	GroupID            *int64 `json:"group_id,omitempty"`
-	GroupName          string `json:"group_name"`
-	Provider           string `json:"provider"`
-	Endpoint           string `json:"endpoint"`
-	Protocol           string `json:"protocol"`
-	Model              string `json:"model"`
-	PromptHash         string `json:"prompt_hash"`
-	RedactedPreview    string `json:"redacted_preview"`
-	FullPrompt         string `json:"full_prompt"`
-	PromptLength       int    `json:"prompt_length"`
-	MessageCount       int    `json:"message_count"`
-	Stage              string `json:"stage"`
+	RequestID           string `json:"request_id"`
+	UserID              int64  `json:"user_id"`
+	UsernameSnapshot    string `json:"username"`
+	UserEmailSnapshot   string `json:"user_email"`
+	APIKeyID            int64  `json:"api_key_id"`
+	APIKeyNameSnapshot  string `json:"api_key_name"`
+	GroupID             *int64 `json:"group_id,omitempty"`
+	GroupName           string `json:"group_name"`
+	Provider            string `json:"provider"`
+	Endpoint            string `json:"endpoint"`
+	Protocol            string `json:"protocol"`
+	Model               string `json:"model"`
+	PromptHash          string `json:"prompt_hash"`
+	EvaluationInputHash string `json:"evaluation_input_hash,omitempty"`
+	RedactedPreview     string `json:"redacted_preview"`
+	FullPrompt          string `json:"full_prompt"`
+	PromptLength        int    `json:"prompt_length"`
+	MessageCount        int    `json:"message_count"`
+	Stage               string `json:"stage"`
 
-	ScanText string `json:"-"`
+	ScanText        string                 `json:"-"`
+	AuditSegments   []AuditSegment         `json:"-"`
+	PayloadSegments []PromptPayloadSegment `json:"-"`
+	LegacyPayload   bool                   `json:"-"`
 }
 
 func (s PromptSnapshot) Redacted() PromptSnapshot {
 	s.ScanText = ""
+	s.AuditSegments = nil
+	s.PayloadSegments = nil
 	return s
+}
+
+type AuditSegment struct {
+	Order       int
+	SourceRole  string
+	PolicyRole  string
+	TurnScope   string
+	Content     string
+	ContentHash string
+}
+
+type PromptPayloadSegment struct {
+	MessageOrder int    `json:"message_order"`
+	SourceRole   string `json:"source_role"`
+	Text         string `json:"text"`
 }
 
 type NormalizedResult struct {
@@ -145,29 +168,47 @@ type NormalizedResult struct {
 }
 
 type ModelAggregation struct {
-	Strategy              string `json:"strategy"`
-	EnabledModelCount     int    `json:"enabled_model_count"`
-	BlockThreshold        int    `json:"block_threshold"`
-	ConfigVersion         int64  `json:"config_version"`
-	PromptContractVersion string `json:"prompt_contract_version"`
-	AuditPromptHash       string `json:"audit_prompt_hash"`
-	PartialFailure        bool   `json:"partial_failure"`
+	Strategy                  string `json:"strategy"`
+	EnabledModelCount         int    `json:"enabled_model_count"`
+	BlockThreshold            int    `json:"block_threshold"`
+	ConfigVersion             int64  `json:"config_version"`
+	PromptContractVersion     string `json:"prompt_contract_version"`
+	AuditPromptHash           string `json:"audit_prompt_hash"`
+	PartialFailure            bool   `json:"partial_failure"`
+	ReusedFromOutcomeID       *int64 `json:"reused_from_outcome_id,omitempty"`
+	EvaluationInputHash       string `json:"evaluation_input_hash,omitempty"`
+	EvaluationContractVersion string `json:"evaluation_contract_version,omitempty"`
+	RoleContractHash          string `json:"role_contract_hash,omitempty"`
+	ThirdPartySegmentTotal    int    `json:"third_party_segment_total,omitempty"`
+	SegmentHistoryHitCount    int    `json:"segment_history_hit_count,omitempty"`
+	WholeModelCallCount       int    `json:"whole_model_call_count,omitempty"`
+	SegmentModelCallCount     int    `json:"segment_model_call_count,omitempty"`
+	JointModelCallCount       int    `json:"joint_model_call_count,omitempty"`
+}
+
+type ModelJointEvaluation struct {
+	Executed bool   `json:"executed"`
+	Trigger  string `json:"trigger,omitempty"`
 }
 
 type ModelAuditResult struct {
-	Sequence        int           `json:"sequence"`
-	EndpointID      string        `json:"endpoint_id"`
-	Adapter         string        `json:"adapter"`
-	Model           string        `json:"model"`
-	Safety          string        `json:"safety"`
-	Categories      []string      `json:"categories"`
-	Decision        EventDecision `json:"decision,omitempty"`
-	Action          Action        `json:"action,omitempty"`
-	LatencyMS       int           `json:"latency_ms"`
-	InputTokens     *int          `json:"input_tokens,omitempty"`
-	OutputTokens    *int          `json:"output_tokens,omitempty"`
-	ReasoningTokens *int          `json:"reasoning_tokens,omitempty"`
-	ErrorCode       string        `json:"error_code"`
+	Sequence        int                   `json:"sequence"`
+	EndpointID      string                `json:"endpoint_id"`
+	Adapter         string                `json:"adapter"`
+	Model           string                `json:"model"`
+	Safety          string                `json:"safety"`
+	Categories      []string              `json:"categories"`
+	Decision        EventDecision         `json:"decision,omitempty"`
+	Action          Action                `json:"action,omitempty"`
+	LatencyMS       int                   `json:"latency_ms"`
+	InputTokens     *int                  `json:"input_tokens,omitempty"`
+	OutputTokens    *int                  `json:"output_tokens,omitempty"`
+	ReasoningTokens *int                  `json:"reasoning_tokens,omitempty"`
+	ErrorCode       string                `json:"error_code"`
+	InputMode       string                `json:"input_mode,omitempty"`
+	SegmentTotal    int                   `json:"segment_total,omitempty"`
+	HistoryHitCount int                   `json:"history_hit_count,omitempty"`
+	JointEvaluation *ModelJointEvaluation `json:"joint_evaluation,omitempty"`
 }
 
 type ModelCallAttempt struct {
@@ -191,9 +232,58 @@ type ModelCallAttempt struct {
 }
 
 type ModelResults struct {
-	Aggregation    ModelAggregation   `json:"aggregation"`
-	Models         []ModelAuditResult `json:"models"`
-	FailedAttempts []ModelCallAttempt `json:"-"`
+	Aggregation       ModelAggregation     `json:"aggregation"`
+	Models            []ModelAuditResult   `json:"models"`
+	FailedAttempts    []ModelCallAttempt   `json:"-"`
+	NewSegmentResults []SegmentAuditResult `json:"-"`
+	SegmentUses       []SegmentResultUse   `json:"-"`
+}
+
+type SegmentReuseKey struct {
+	LookupKey                 string
+	ContentHash               string
+	PolicyRole                string
+	TurnScope                 string
+	EndpointID                string
+	Adapter                   string
+	ConfigVersion             int64
+	AuditPromptHash           string
+	RolePromptHash            string
+	EvaluationContractVersion string
+	PromptContractVersion     string
+}
+
+type SegmentAuditResult struct {
+	ID         int64
+	ReuseKey   SegmentReuseKey
+	SourceRole string
+	Model      string
+	Decision   EventDecision
+	Action     Action
+	Categories []string
+}
+
+type SegmentResultUse struct {
+	EndpointID            string
+	SegmentOrder          int
+	SourceRole            string
+	PolicyRole            string
+	TurnScope             string
+	LookupKey             string
+	SourceSegmentResultID int64
+}
+
+type PromptAuditSegmentDetail struct {
+	EndpointID                string        `json:"endpoint_id"`
+	SegmentOrder              int           `json:"segment_order"`
+	SourceRole                string        `json:"source_role"`
+	PolicyRole                string        `json:"policy_role"`
+	TurnScope                 string        `json:"turn_scope"`
+	SourceSegmentResultID     int64         `json:"source_segment_result_id"`
+	ReusedFromSegmentResultID *int64        `json:"reused_from_segment_result_id,omitempty"`
+	Decision                  EventDecision `json:"decision"`
+	Action                    Action        `json:"action"`
+	Categories                []string      `json:"categories"`
 }
 
 type PromptDecision struct {
@@ -391,5 +481,6 @@ type ModelScanRequest struct {
 	Endpoint        ActiveEndpoint
 	FullPrompt      string
 	AuditPrompt     string
+	RolePrompt      string
 	EnabledScanners []string
 }

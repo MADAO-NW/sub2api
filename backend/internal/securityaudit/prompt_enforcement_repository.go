@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,26 +20,30 @@ const (
 )
 
 type Outcome struct {
-	ID                    int64
-	JobID                 int64
-	EventID               *int64
-	RequestID             string
-	UserID                int64
-	UsernameSnapshot      string
-	UserEmailSnapshot     string
-	RequestCreatedAt      time.Time
-	ClassifiedAt          time.Time
-	Decision              EventDecision
-	Action                Action
-	IsViolation           bool
-	Categories            []string
-	ConfigVersion         int64
-	AuditPromptHash       string
-	PromptContractVersion string
-	AggregationStrategy   string
-	EnabledModelCount     int
-	BlockThreshold        int
-	PartialFailure        bool
+	ID                        int64
+	JobID                     int64
+	EventID                   *int64
+	RequestID                 string
+	UserID                    int64
+	UsernameSnapshot          string
+	UserEmailSnapshot         string
+	RequestCreatedAt          time.Time
+	ClassifiedAt              time.Time
+	Decision                  EventDecision
+	Action                    Action
+	IsViolation               bool
+	Categories                []string
+	ConfigVersion             int64
+	AuditPromptHash           string
+	PromptContractVersion     string
+	AggregationStrategy       string
+	EnabledModelCount         int
+	BlockThreshold            int
+	PartialFailure            bool
+	ReusedFromOutcomeID       *int64
+	EvaluationInputHash       string
+	EvaluationContractVersion string
+	RoleContractHash          string
 }
 
 type CompletionResult struct {
@@ -66,6 +71,18 @@ func insertOutcome(
 		return nil, fmt.Errorf("prompt audit outcome requires job and result")
 	}
 	aggregation := result.ModelResults.Aggregation
+	evaluationInputHash := aggregation.EvaluationInputHash
+	if evaluationInputHash == "" {
+		evaluationInputHash = job.Snapshot.EvaluationInputHash
+	}
+	evaluationContractVersion := aggregation.EvaluationContractVersion
+	if evaluationContractVersion == "" {
+		evaluationContractVersion = EvaluationContractVersion
+	}
+	roleContractHash := aggregation.RoleContractHash
+	if roleContractHash == "" {
+		roleContractHash = currentRoleContractHash()
+	}
 	categories, err := json.Marshal(result.Categories)
 	if err != nil {
 		return nil, err
@@ -83,6 +100,10 @@ func insertOutcome(
 		AuditPromptHash: aggregation.AuditPromptHash, PromptContractVersion: aggregation.PromptContractVersion,
 		AggregationStrategy: aggregation.Strategy, EnabledModelCount: aggregation.EnabledModelCount,
 		BlockThreshold: aggregation.BlockThreshold, PartialFailure: aggregation.PartialFailure,
+		ReusedFromOutcomeID:       aggregation.ReusedFromOutcomeID,
+		EvaluationInputHash:       evaluationInputHash,
+		EvaluationContractVersion: evaluationContractVersion,
+		RoleContractHash:          roleContractHash,
 	}
 	var storedEventID, storedUserID sql.NullInt64
 	var createdAt time.Time
@@ -90,9 +111,10 @@ func insertOutcome(
 		INSERT INTO prompt_audit_outcomes (
 			job_id,event_id,request_id,user_id,username_snapshot,user_email_snapshot,prompt_hash,
 			request_created_at,decision,action,is_violation,categories,config_version,audit_prompt_hash,
-			prompt_contract_version,aggregation_strategy,enabled_model_count,block_threshold,partial_failure
+			prompt_contract_version,aggregation_strategy,enabled_model_count,block_threshold,partial_failure,
+			reused_from_outcome_id,evaluation_input_hash,evaluation_contract_version,role_contract_hash
 		) VALUES (
-			$1,$2,$3,(SELECT id FROM users WHERE id=$4),$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19
+			$1,$2,$3,(SELECT id FROM users WHERE id=$4),$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
 		)
 		RETURNING id,event_id,user_id,classified_at,created_at`,
 		job.ID, eventID, job.Snapshot.RequestID, nullableID(job.Snapshot.UserID),
@@ -100,7 +122,8 @@ func insertOutcome(
 		job.CreatedAt.UTC(), string(result.Decision), string(result.Action), outcome.IsViolation,
 		categories, aggregation.ConfigVersion, aggregation.AuditPromptHash,
 		aggregation.PromptContractVersion, aggregation.Strategy, aggregation.EnabledModelCount,
-		aggregation.BlockThreshold, aggregation.PartialFailure,
+		aggregation.BlockThreshold, aggregation.PartialFailure, nullableInt64(aggregation.ReusedFromOutcomeID),
+		evaluationInputHash, evaluationContractVersion, roleContractHash,
 	).Scan(&outcome.ID, &storedEventID, &storedUserID, &outcome.ClassifiedAt, &createdAt)
 	if err != nil {
 		return nil, err
@@ -110,6 +133,84 @@ func insertOutcome(
 	}
 	outcome.UserID = nullableInt64Value(storedUserID)
 	return outcome, nil
+}
+
+func (r *PostgreSQLRepository) FindReusableResult(
+	ctx context.Context,
+	snapshot PromptSnapshot,
+	cfg ActiveConfig,
+) (*NormalizedResult, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("prompt audit database unavailable")
+	}
+	enabledModelCount := len(cfg.EnabledEndpoints())
+	blockThreshold := CalculateBlockThreshold(cfg.AggregationStrategy, enabledModelCount)
+	if snapshot.EvaluationInputHash == "" {
+		return nil, nil
+	}
+	var outcomeID int64
+	var decision EventDecision
+	var action Action
+	var categoriesJSON []byte
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id,decision,action,categories
+		FROM prompt_audit_outcomes
+		WHERE prompt_hash=$1
+		  AND evaluation_input_hash=$2
+		  AND evaluation_contract_version=$3
+		  AND role_contract_hash=$4
+		  AND config_version=$5
+		  AND audit_prompt_hash=$6
+		  AND prompt_contract_version=$7
+		  AND aggregation_strategy=$8
+		  AND enabled_model_count=$9
+		  AND block_threshold=$10
+		  AND partial_failure=FALSE
+		  AND reused_from_outcome_id IS NULL
+		  AND ((decision='pass' AND action='Allow')
+		    OR (decision='flag' AND action='Warn')
+		    OR (decision='critical' AND action='Block'))
+		ORDER BY id DESC
+		LIMIT 1`,
+		snapshot.PromptHash, snapshot.EvaluationInputHash, EvaluationContractVersion, currentRoleContractHash(),
+		cfg.ConfigVersion, promptAuditHash(cfg.AuditPrompt), PromptContractVersion,
+		cfg.AggregationStrategy, enabledModelCount, blockThreshold,
+	).Scan(&outcomeID, &decision, &action, &categoriesJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	categories := []string{}
+	if err := json.Unmarshal(categoriesJSON, &categories); err != nil {
+		return nil, err
+	}
+	riskLevel, safety := RiskLow, "Safe"
+	switch decision {
+	case EventFlag:
+		riskLevel, safety = RiskHigh, "Controversial"
+	case EventCritical:
+		riskLevel, safety = RiskCritical, "Unsafe"
+	}
+	return &NormalizedResult{
+		Decision: decision, RiskLevel: riskLevel, Action: action, Safety: safety,
+		Categories: append([]string(nil), categories...), MatchedScanners: append([]string(nil), categories...),
+		ScannerScores: map[string]float64{}, ScannerEvidence: map[string]string{},
+		ScannerBackend: "history-reuse", ScannerVersion: PromptContractVersion,
+		PolicyID: cfg.AggregationStrategy, PolicyVersion: 1, ChunkTotal: 1,
+		ModelResults: ModelResults{
+			Aggregation: ModelAggregation{
+				Strategy: cfg.AggregationStrategy, EnabledModelCount: enabledModelCount,
+				BlockThreshold: blockThreshold, ConfigVersion: cfg.ConfigVersion,
+				PromptContractVersion: PromptContractVersion, AuditPromptHash: promptAuditHash(cfg.AuditPrompt),
+				ReusedFromOutcomeID:       &outcomeID,
+				EvaluationInputHash:       snapshot.EvaluationInputHash,
+				EvaluationContractVersion: EvaluationContractVersion, RoleContractHash: currentRoleContractHash(),
+			},
+			Models: []ModelAuditResult{},
+		},
+	}, nil
 }
 
 func applyOutcomeEnforcement(

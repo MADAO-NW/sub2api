@@ -170,7 +170,11 @@ function openCreate() {
 }
 function openEdit(endpoint: PromptAuditEndpointDraft) {
   editingIndex.value = props.endpoints.findIndex((item) => item.id === endpoint.id)
-  editing.value = cloneData(endpoint)
+  const value = cloneData(endpoint)
+  if (value.adapter !== 'qwen3guard' && value.adapter !== 'openai_compatible_qwen') {
+    value.adapter = 'openai_compatible_qwen'
+  }
+  editing.value = value
 }
 function closeEditor() {
   editing.value = null

@@ -3,6 +3,7 @@ import type { PromptAuditConfig } from '../types'
 import {
   buildUpdateRequest,
   configToDraft,
+  createDefaultEndpoint,
   draftFingerprint,
   emptyEventFilters,
   eventFilterPayload,
@@ -42,6 +43,10 @@ const config = (): PromptAuditConfig => ({
 })
 
 describe('Prompt Audit view model', () => {
+  it('defaults newly added models to the third-party adapter', () => {
+    expect(createDefaultEndpoint(2).adapter).toBe('openai_compatible_qwen')
+  })
+
   it('normalizes legacy null collections from the public config', () => {
     const legacy = { ...config(), group_ids: null, scanners: null, endpoints: null } as unknown as PromptAuditConfig
     expect(configToDraft(legacy)).toMatchObject({ group_ids: [], scanners: [], endpoints: [] })
@@ -63,6 +68,10 @@ describe('Prompt Audit view model', () => {
     draft.endpoints[0].token = ''
     draft.endpoints[0].clear_token = true
     expect(buildUpdateRequest(draft).endpoints[0]).toMatchObject({ token: undefined, clear_token: true })
+  })
+
+  it('preserves the saved adapter when editing an existing model', () => {
+    expect(configToDraft(config()).endpoints[0].adapter).toBe('qwen3guard')
   })
 
   it('includes the optional narrow blocking scope in the update payload', () => {

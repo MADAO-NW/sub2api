@@ -57,6 +57,7 @@ var allowedLogFields = map[string]struct{}{
 	"billing_preconsumed": {}, "worker_id": {}, "reclaimed_total": {}, "attempts": {},
 	"max_attempts": {}, "claim_version": {}, "http_status": {}, "retryable": {},
 	"aggregation_strategy": {}, "enabled_model_count": {}, "block_threshold": {}, "partial_failure": {},
+	"result_source": {}, "reused_from_outcome_id": {},
 }
 
 func LogInfo(event string, fields map[string]any) {

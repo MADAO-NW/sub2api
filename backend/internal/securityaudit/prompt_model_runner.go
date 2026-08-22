@@ -13,14 +13,19 @@ type beforeModelCall func(context.Context, ActiveEndpoint) error
 
 type modelScannerCall func(context.Context, ModelScanRequest) (*NormalizedResult, error)
 
+type SegmentResultFinder interface {
+	FindReusableSegments(context.Context, []SegmentReuseKey) (map[string]SegmentAuditResult, error)
+}
+
 func runOrderedModels(
 	ctx context.Context,
 	cfg ActiveConfig,
-	fullPrompt string,
+	snapshot PromptSnapshot,
 	clock Clock,
 	metrics Metrics,
 	before beforeModelCall,
 	scan modelScannerCall,
+	segmentFinder SegmentResultFinder,
 ) (*NormalizedResult, error) {
 	endpoints := cfg.EnabledEndpoints()
 	if len(endpoints) == 0 || scan == nil {
@@ -29,53 +34,83 @@ func runOrderedModels(
 	if clock == nil {
 		clock = realClock{}
 	}
-	fullPrompt = modelPromptFromScanText(fullPrompt)
+	fullPrompt := modelPromptFromScanText(snapshot.ScanText)
 	started := clock.Now()
 	models := make([]ModelAuditResult, 0, len(endpoints))
 	validResults := make([]*NormalizedResult, 0, len(endpoints))
 	errorsByModel := make([]error, 0, len(endpoints))
 	failedAttempts := make([]ModelCallAttempt, 0, len(endpoints))
+	newSegmentResults := make([]SegmentAuditResult, 0)
+	segmentUses := make([]SegmentResultUse, 0)
+	reusableSegments := map[string]SegmentAuditResult{}
+	if !snapshot.LegacyPayload && len(snapshot.AuditSegments) > 0 && segmentFinder != nil {
+		keysByID := map[string]SegmentReuseKey{}
+		for _, endpoint := range endpoints {
+			if endpoint.Adapter != AdapterOpenAICompatibleQwen {
+				continue
+			}
+			for _, segment := range snapshot.AuditSegments {
+				key := buildSegmentReuseKey(segment, endpoint, cfg)
+				keysByID[key.LookupKey] = key
+			}
+		}
+		keys := make([]SegmentReuseKey, 0, len(keysByID))
+		for _, key := range keysByID {
+			keys = append(keys, key)
+		}
+		if len(keys) > 0 {
+			found, err := segmentFinder.FindReusableSegments(ctx, keys)
+			if err != nil {
+				LogWarn(EventProcessFailed, map[string]any{"status": "segment_history_lookup_fallback", "error_code": "segment_history_lookup_failed"})
+			} else {
+				reusableSegments = found
+			}
+		}
+	}
+	wholeModelCalls, segmentModelCalls, jointModelCalls, historyHits := 0, 0, 0, 0
 	for index, endpoint := range endpoints {
-		if before != nil {
-			if err := before(ctx, endpoint); err != nil {
-				return nil, err
-			}
-		}
 		modelStarted := clock.Now()
-		timeout, timeoutErr := timeoutDuration(endpoint.TimeoutMS)
-		if timeoutErr != nil {
-			return nil, &GuardError{
-				Code: ErrorCodeInvalidResponse, DetailCode: "invalid_timeout", Cause: timeoutErr,
-			}
+		var result *NormalizedResult
+		var scanErr error
+		var modelAttempts []ModelCallAttempt
+		inputMode := "whole_prompt"
+		segmentTotal, endpointHistoryHits := 0, 0
+		joint := (*ModelJointEvaluation)(nil)
+		if endpoint.Adapter == AdapterOpenAICompatibleQwen && !snapshot.LegacyPayload && len(snapshot.AuditSegments) > 0 {
+			inputMode = "role_segments"
+			segmentTotal = len(snapshot.AuditSegments)
+			var evaluation thirdPartyEndpointEvaluation
+			evaluation, scanErr = evaluateThirdPartyEndpoint(
+				ctx, cfg, endpoint, snapshot.AuditSegments, reusableSegments, before, scan,
+			)
+			result = evaluation.Result
+			modelAttempts = evaluation.Attempts
+			newSegmentResults = append(newSegmentResults, evaluation.NewResults...)
+			segmentUses = append(segmentUses, evaluation.Uses...)
+			endpointHistoryHits = evaluation.HistoryHits
+			historyHits += evaluation.HistoryHits
+			segmentModelCalls += evaluation.SegmentCalls
+			jointModelCalls += evaluation.JointCalls
+			joint = evaluation.Joint
+		} else {
+			wholeModelCalls++
+			result, scanErr, modelAttempts = executeModelCall(ctx, cfg, endpoint, fullPrompt, "", before, scan)
 		}
-		modelCtx, cancel := context.WithTimeout(ctx, timeout)
-		result, scanErr := scan(modelCtx, ModelScanRequest{
-			Endpoint: endpoint, FullPrompt: fullPrompt, AuditPrompt: cfg.AuditPrompt,
-			EnabledScanners: append([]string(nil), cfg.Scanners...),
-		})
-		cancel()
 		if errors.Is(scanErr, ErrLeaseLost) {
 			return nil, ErrLeaseLost
 		}
 		latencyMS := int(clock.Now().Sub(modelStarted).Milliseconds())
 		detail := ModelAuditResult{
 			Sequence: index + 1, EndpointID: endpoint.ID, Adapter: endpoint.Adapter,
-			Model: endpoint.Model, LatencyMS: latencyMS, Categories: []string{},
+			Model: endpoint.Model, LatencyMS: latencyMS, Categories: []string{}, InputMode: inputMode,
+			SegmentTotal: segmentTotal, HistoryHitCount: endpointHistoryHits, JointEvaluation: joint,
 		}
 		if scanErr == nil && result == nil {
 			scanErr = invalidGuardOutput("empty_model_result")
 		}
-		modelAttempts := []ModelCallAttempt{}
-		if result != nil {
-			modelAttempts = append(modelAttempts, result.FailedAttempts...)
-			result.FailedAttempts = nil
-		}
-		var guardErr *GuardError
-		if errors.As(scanErr, &guardErr) {
-			modelAttempts = append(modelAttempts, guardErr.Attempts...)
-		}
 		for attemptIndex := range modelAttempts {
 			modelAttempts[attemptIndex].ModelSequence = index + 1
+			modelAttempts[attemptIndex].CallAttempt = attemptIndex + 1
 			if modelAttempts[attemptIndex].EndpointID == "" {
 				modelAttempts[attemptIndex].EndpointID = endpoint.ID
 			}
@@ -116,8 +151,13 @@ func runOrderedModels(
 			BlockThreshold: CalculateBlockThreshold(cfg.AggregationStrategy, len(endpoints)),
 			ConfigVersion:  cfg.ConfigVersion, PromptContractVersion: PromptContractVersion,
 			AuditPromptHash: promptAuditHash(cfg.AuditPrompt), PartialFailure: len(errorsByModel) > 0,
+			EvaluationInputHash: snapshot.EvaluationInputHash, EvaluationContractVersion: EvaluationContractVersion,
+			RoleContractHash: currentRoleContractHash(), ThirdPartySegmentTotal: len(snapshot.AuditSegments),
+			SegmentHistoryHitCount: historyHits, WholeModelCallCount: wholeModelCalls,
+			SegmentModelCallCount: segmentModelCalls, JointModelCallCount: jointModelCalls,
 		},
 		Models: models, FailedAttempts: failedAttempts,
+		NewSegmentResults: newSegmentResults, SegmentUses: segmentUses,
 	}
 	latency := clock.Now().Sub(started)
 	if metrics != nil {
@@ -128,6 +168,197 @@ func runOrderedModels(
 	}
 	aggregated := aggregateModelResults(validResults, modelResults, latency)
 	return aggregated, nil
+}
+
+type thirdPartyEndpointEvaluation struct {
+	Result       *NormalizedResult
+	Attempts     []ModelCallAttempt
+	NewResults   []SegmentAuditResult
+	Uses         []SegmentResultUse
+	HistoryHits  int
+	SegmentCalls int
+	JointCalls   int
+	Joint        *ModelJointEvaluation
+}
+
+func evaluateThirdPartyEndpoint(
+	ctx context.Context,
+	cfg ActiveConfig,
+	endpoint ActiveEndpoint,
+	segments []AuditSegment,
+	reusable map[string]SegmentAuditResult,
+	before beforeModelCall,
+	scan modelScannerCall,
+) (thirdPartyEndpointEvaluation, error) {
+	evaluation := thirdPartyEndpointEvaluation{}
+	resolved := make(map[string]SegmentAuditResult, len(segments))
+	byOrder := make(map[int]SegmentAuditResult, len(segments))
+	var inputTokens, outputTokens, reasoningTokens int
+	var hasInputTokens, hasOutputTokens, hasReasoningTokens bool
+	for _, segment := range segments {
+		key := buildSegmentReuseKey(segment, endpoint, cfg)
+		segmentResult, ok := resolved[key.LookupKey]
+		if !ok {
+			segmentResult, ok = reusable[key.LookupKey]
+			if ok {
+				evaluation.HistoryHits++
+			} else {
+				evaluation.SegmentCalls++
+				modelResult, err, attempts := executeModelCall(
+					ctx, cfg, endpoint, segmentPromptJSON(segment), rolePromptForSegment(segment), before, scan,
+				)
+				evaluation.Attempts = append(evaluation.Attempts, attempts...)
+				if err != nil {
+					return evaluation, err
+				}
+				addTokenUsage(&inputTokens, &hasInputTokens, modelResult.InputTokens)
+				addTokenUsage(&outputTokens, &hasOutputTokens, modelResult.OutputTokens)
+				addTokenUsage(&reasoningTokens, &hasReasoningTokens, modelResult.ReasoningTokens)
+				segmentResult = SegmentAuditResult{
+					ReuseKey: key, SourceRole: segment.SourceRole, Model: endpoint.Model,
+					Decision: modelResult.Decision, Action: modelResult.Action,
+					Categories: append([]string(nil), modelResult.Categories...),
+				}
+				evaluation.NewResults = append(evaluation.NewResults, segmentResult)
+			}
+			resolved[key.LookupKey] = segmentResult
+		}
+		byOrder[segment.Order] = segmentResult
+	}
+
+	allPass := true
+	directCritical := false
+	directCategories := map[string]struct{}{}
+	jointSegments := make([]AuditSegment, 0, len(segments))
+	jointTrigger := ""
+	for _, segment := range segments {
+		result := byOrder[segment.Order]
+		if result.Decision != EventPass || result.Action != ActionAllow {
+			allPass = false
+		}
+		direct := segmentDirectlyAffectsTask(segment)
+		if direct && result.Decision == EventCritical && result.Action == ActionBlock {
+			directCritical = true
+			for _, category := range result.Categories {
+				directCategories[category] = struct{}{}
+			}
+		}
+		if direct || result.Decision != EventPass || result.Action != ActionAllow {
+			jointSegments = append(jointSegments, segment)
+		}
+		if direct && result.Decision == EventFlag {
+			jointTrigger = "direct_flag"
+		} else if !direct && result.Decision != EventPass && jointTrigger == "" {
+			jointTrigger = "context_risk"
+		}
+		if direct || result.Decision != EventPass || result.Action != ActionAllow {
+			evaluation.Uses = append(evaluation.Uses, SegmentResultUse{
+				EndpointID: endpoint.ID, SegmentOrder: segment.Order, SourceRole: segment.SourceRole,
+				PolicyRole: segment.PolicyRole, TurnScope: segment.TurnScope, LookupKey: result.ReuseKey.LookupKey,
+				SourceSegmentResultID: result.ID,
+			})
+		}
+	}
+
+	switch {
+	case allPass:
+		evaluation.Result = normalizedEndpointResult(endpoint.ID, EventPass, ActionAllow, nil)
+	case directCritical:
+		evaluation.Result = normalizedEndpointResult(endpoint.ID, EventCritical, ActionBlock, orderedScannerKeys(directCategories))
+	default:
+		evaluation.JointCalls = 1
+		evaluation.Joint = &ModelJointEvaluation{Executed: true, Trigger: jointTrigger}
+		jointResult, err, attempts := executeModelCall(
+			ctx, cfg, endpoint, jointPromptJSON(jointSegments), roleJointRule, before, scan,
+		)
+		evaluation.Attempts = append(evaluation.Attempts, attempts...)
+		if err != nil {
+			return evaluation, err
+		}
+		addTokenUsage(&inputTokens, &hasInputTokens, jointResult.InputTokens)
+		addTokenUsage(&outputTokens, &hasOutputTokens, jointResult.OutputTokens)
+		addTokenUsage(&reasoningTokens, &hasReasoningTokens, jointResult.ReasoningTokens)
+		evaluation.Result = jointResult
+	}
+	if evaluation.Result != nil {
+		evaluation.Result.GuardEndpointID = endpoint.ID
+		evaluation.Result.ChunkTotal = len(segments)
+		evaluation.Result.InputTokens = tokenPointer(inputTokens, hasInputTokens)
+		evaluation.Result.OutputTokens = tokenPointer(outputTokens, hasOutputTokens)
+		evaluation.Result.ReasoningTokens = tokenPointer(reasoningTokens, hasReasoningTokens)
+	}
+	return evaluation, nil
+}
+
+func executeModelCall(
+	ctx context.Context,
+	cfg ActiveConfig,
+	endpoint ActiveEndpoint,
+	prompt string,
+	rolePrompt string,
+	before beforeModelCall,
+	scan modelScannerCall,
+) (*NormalizedResult, error, []ModelCallAttempt) {
+	if before != nil {
+		if err := before(ctx, endpoint); err != nil {
+			return nil, err, nil
+		}
+	}
+	timeout, err := timeoutDuration(endpoint.TimeoutMS)
+	if err != nil {
+		return nil, &GuardError{Code: ErrorCodeInvalidResponse, DetailCode: "invalid_timeout", Cause: err}, nil
+	}
+	modelCtx, cancel := context.WithTimeout(ctx, timeout)
+	result, scanErr := scan(modelCtx, ModelScanRequest{
+		Endpoint: endpoint, FullPrompt: prompt, AuditPrompt: cfg.AuditPrompt, RolePrompt: rolePrompt,
+		EnabledScanners: append([]string(nil), cfg.Scanners...),
+	})
+	cancel()
+	if scanErr == nil && result == nil {
+		scanErr = invalidGuardOutput("empty_model_result")
+	}
+	attempts := make([]ModelCallAttempt, 0, 2)
+	if result != nil {
+		attempts = append(attempts, result.FailedAttempts...)
+		result.FailedAttempts = nil
+	}
+	var guardErr *GuardError
+	if errors.As(scanErr, &guardErr) {
+		attempts = append(attempts, guardErr.Attempts...)
+	}
+	return result, scanErr, attempts
+}
+
+func normalizedEndpointResult(endpointID string, decision EventDecision, action Action, categories []string) *NormalizedResult {
+	riskLevel, safety := RiskLow, "Safe"
+	if decision == EventFlag {
+		riskLevel, safety = RiskHigh, "Controversial"
+	}
+	if decision == EventCritical {
+		riskLevel, safety = RiskCritical, "Unsafe"
+	}
+	return &NormalizedResult{
+		Decision: decision, RiskLevel: riskLevel, Action: action, Safety: safety,
+		Categories: append([]string(nil), categories...), MatchedScanners: append([]string(nil), categories...),
+		ScannerScores: map[string]float64{}, ScannerEvidence: map[string]string{},
+		ScannerBackend: "third-party-role-segments", ScannerVersion: PromptContractVersion,
+		GuardEndpointID: endpointID, ChunkTotal: 1,
+	}
+}
+
+func addTokenUsage(total *int, present *bool, value *int) {
+	if value == nil {
+		return
+	}
+	*total += *value
+	*present = true
+}
+
+func tokenPointer(total int, present bool) *int {
+	if !present {
+		return nil
+	}
+	return &total
 }
 
 func modelPromptFromScanText(scanText string) string {

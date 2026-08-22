@@ -228,6 +228,7 @@ export interface PromptSnapshot {
   protocol: string
   model: string
   prompt_hash: string
+  evaluation_input_hash?: string
   redacted_preview: string
   full_prompt: string
   prompt_length: number
@@ -280,6 +281,15 @@ export interface PromptAuditEvent {
       prompt_contract_version: string
       audit_prompt_hash: string
       partial_failure: boolean
+      reused_from_outcome_id?: number
+      evaluation_input_hash?: string
+      evaluation_contract_version?: string
+      role_contract_hash?: string
+      third_party_segment_total?: number
+      segment_history_hit_count?: number
+      whole_model_call_count?: number
+      segment_model_call_count?: number
+      joint_model_call_count?: number
     }
     models: Array<{
       sequence: number
@@ -295,8 +305,27 @@ export interface PromptAuditEvent {
       output_tokens?: number
       reasoning_tokens?: number
       error_code: string
+      input_mode?: 'whole_prompt' | 'role_segments' | string
+      segment_total?: number
+      history_hit_count?: number
+      joint_evaluation?: {
+        executed: boolean
+        trigger?: string
+      }
     }>
   }
+  segments?: Array<{
+    endpoint_id: string
+    segment_order: number
+    source_role: string
+    policy_role: string
+    turn_scope: string
+    source_segment_result_id: number
+    reused_from_segment_result_id?: number
+    decision: PromptDecision
+    action: 'Allow' | 'Warn' | 'Block'
+    categories: string[]
+  }>
   issue_summaries: PromptIssueSummary[]
   created_at: string
 }

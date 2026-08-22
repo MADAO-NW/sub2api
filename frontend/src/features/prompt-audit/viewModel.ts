@@ -7,6 +7,7 @@ import type {
 } from './types'
 
 export const DEFAULT_GUARD_MODEL = 'sileader/qwen3guard:0.6b'
+export const DEFAULT_ENDPOINT_ADAPTER = 'openai_compatible_qwen' as const
 
 export const SCANNER_CATALOG = [
   { id: 'violent', label: 'Violent' },
@@ -44,7 +45,7 @@ export function createDefaultEndpoint(index = 1): PromptAuditEndpointDraft {
   return {
     id: `guard-${Date.now()}-${index}`,
     name: `Guard ${index}`,
-    adapter: 'qwen3guard',
+    adapter: DEFAULT_ENDPOINT_ADAPTER,
     protocol: 'openai_compatible',
     base_url: 'http://127.0.0.1:8000',
     model: DEFAULT_GUARD_MODEL,

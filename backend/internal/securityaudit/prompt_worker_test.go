@@ -69,6 +69,8 @@ type fakeJobRepository struct {
 	refreshErrAfter int
 	refreshNotify   chan int
 	completeErr     error
+	reusableResult  *NormalizedResult
+	reusableErr     error
 	retryErr        error
 	failErr         error
 
@@ -77,6 +79,7 @@ type fakeJobRepository struct {
 	completedResult *NormalizedResult
 	completedStore  bool
 	completeCount   int
+	reuseLookups    int
 	eventCount      int
 	retryAt         time.Time
 	retryCode       string
@@ -155,6 +158,12 @@ func (r *fakeJobRepository) RefreshLease(context.Context, int64, int64, time.Tim
 		return r.refreshErr
 	}
 	return nil
+}
+func (r *fakeJobRepository) FindReusableResult(context.Context, PromptSnapshot, ActiveConfig) (*NormalizedResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reuseLookups++
+	return r.reusableResult, r.reusableErr
 }
 func (r *fakeJobRepository) Complete(_ context.Context, _ *Job, result *NormalizedResult, cfg ActiveConfig) (*CompletionResult, error) {
 	r.mu.Lock()
@@ -283,7 +292,10 @@ func TestEnqueuerStagingPayloadPublishProtocolAndFailureCleanup(t *testing.T) {
 		require.NoError(t, enqueuer.Enqueue(context.Background(), asyncRequest()))
 		require.Equal(t, []string{"create_staging", "payload_set", "publish_queued"}, trace)
 		require.Empty(t, repo.createdSnapshot.ScanText)
-		require.Equal(t, "payload canary text", payload.values[41])
+		restored := repo.createdSnapshot
+		require.NoError(t, hydrateSnapshotFromPayload(&restored, payload.values[41]))
+		require.Equal(t, "payload canary text", restored.ScanText)
+		require.Equal(t, []AuditSegment{{Order: 1, SourceRole: "user", PolicyRole: "user", TurnScope: "current", Content: "payload canary text", ContentHash: promptAuditHash("payload canary text")}}, restored.AuditSegments)
 		require.Equal(t, DefaultPayloadTTL, payload.setTTL)
 	})
 
@@ -402,6 +414,11 @@ func TestPayloadTTLSupportsLargeTimeoutsAndRejectsOverflow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3*time.Hour+5*time.Minute+35*time.Second, ttl)
 
+	cfg.Endpoints[0].Adapter = AdapterOpenAICompatibleQwen
+	ttl, err = payloadTTL(cfg, promptAuditMaxAttempts, 2)
+	require.NoError(t, err)
+	require.Equal(t, 9*time.Hour+5*time.Minute+35*time.Second, ttl)
+
 	cfg.Endpoints[0].TimeoutMS = maxRepresentableTimeoutMS
 	_, err = payloadTTL(cfg, promptAuditMaxAttempts)
 	require.Error(t, err)
@@ -432,6 +449,42 @@ func TestWorkerCompletesPassWithoutEventRefreshesBeforeModelAndDeletesPayload(t 
 	require.Equal(t, []int64{51}, payload.deleted)
 	require.Equal(t, int64(1), metrics.Snapshot().Total)
 	require.Equal(t, int64(1), metrics.Snapshot().Allowed)
+}
+
+func TestWorkerReusesHistoricalResultWithoutCallingModel(t *testing.T) {
+	sourceOutcomeID := int64(88)
+	historical := integrationResult(EventCritical)
+	historical.ModelResults.Aggregation.ReusedFromOutcomeID = &sourceOutcomeID
+	repo := &fakeJobRepository{reusableResult: historical}
+	payload := &fakePayloadStore{values: map[int64]string{51: "repeated unsafe prompt"}}
+	scannerCalls := 0
+	runner := NewRunner(&fakeConfigStore{cfg: asyncConfig(), active: true}, repo, payload, PromptScannerFunc(func(context.Context, ActiveEndpoint, string, []string) (*NormalizedResult, error) {
+		scannerCalls++
+		return integrationResult(EventPass), nil
+	}), NewAtomicMetrics())
+	job := workerJob(1, 3)
+	job.Snapshot.PromptHash = strings.Repeat("a", 64)
+
+	require.NoError(t, runner.processJob(context.Background(), 0, asyncConfig(), job))
+	require.Zero(t, scannerCalls)
+	require.Equal(t, 1, repo.reuseLookups)
+	require.Zero(t, repo.refreshes)
+	require.Same(t, historical, repo.completedResult)
+	require.Equal(t, []int64{51}, payload.deleted)
+}
+
+func TestWorkerFallsBackToModelWhenHistoricalLookupFails(t *testing.T) {
+	repo := &fakeJobRepository{reusableErr: errors.New("database lookup failed")}
+	payload := &fakePayloadStore{values: map[int64]string{51: "new prompt"}}
+	scannerCalls := 0
+	runner := NewRunner(&fakeConfigStore{cfg: asyncConfig(), active: true}, repo, payload, PromptScannerFunc(func(context.Context, ActiveEndpoint, string, []string) (*NormalizedResult, error) {
+		scannerCalls++
+		return integrationResult(EventPass), nil
+	}), NewAtomicMetrics())
+
+	require.NoError(t, runner.processJob(context.Background(), 0, asyncConfig(), workerJob(1, 3)))
+	require.Equal(t, 1, scannerCalls)
+	require.Equal(t, 1, repo.reuseLookups)
 }
 
 func TestWorkerRefreshesLeaseDuringLongModelCall(t *testing.T) {

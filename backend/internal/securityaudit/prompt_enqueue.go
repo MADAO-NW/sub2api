@@ -54,7 +54,7 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "snapshot_invalid"}))
 		return nil
 	}
-	ttl, err := payloadTTL(cfg, promptAuditMaxAttempts)
+	ttl, err := payloadTTL(cfg, promptAuditMaxAttempts, len(snapshot.AuditSegments))
 	if err != nil {
 		e.recordDropped()
 		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "invalid_timeout_budget"}))
@@ -75,7 +75,13 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 		e.recordDropped()
 		return err
 	}
-	if err := e.payload.Set(ctx, job.ID, snapshot.ScanText, ttl); err != nil {
+	payload, err := encodePromptAuditPayload(snapshot)
+	if err != nil {
+		_ = e.repo.MarkStagingFailed(ctx, job.ID, "payload_encode_failed", "payload encoding failed")
+		e.recordDropped()
+		return err
+	}
+	if err := e.payload.Set(ctx, job.ID, payload, ttl); err != nil {
 		_ = e.repo.MarkStagingFailed(ctx, job.ID, "payload_store_failed", "payload store unavailable")
 		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{
 			"job_id": job.ID, "status": "dropped", "error_code": "payload_store_failed",
@@ -102,18 +108,34 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 	return nil
 }
 
-func payloadTTL(cfg ActiveConfig, maxAttempts int) (time.Duration, error) {
-	timeouts := make([]int64, 0, len(cfg.Endpoints))
-	for _, endpoint := range cfg.EnabledEndpoints() {
-		timeouts = append(timeouts, endpoint.TimeoutMS)
+func payloadTTL(cfg ActiveConfig, maxAttempts int, segmentCounts ...int) (time.Duration, error) {
+	segmentCount := 1
+	if len(segmentCounts) > 0 && segmentCounts[0] > 0 {
+		segmentCount = segmentCounts[0]
 	}
-	return timeoutBudgetTTL(timeouts, maxAttempts)
+	var perAttemptMS int64
+	for _, endpoint := range cfg.EnabledEndpoints() {
+		callCount := int64(1)
+		if endpoint.Adapter == AdapterOpenAICompatibleQwen {
+			callCount = int64(segmentCount) + 1
+		}
+		timeout := endpoint.TimeoutMS
+		if timeout <= 0 {
+			timeout = DefaultTimeoutMS
+		}
+		if callCount <= 0 || timeout > maxRepresentableTimeoutMS/callCount {
+			return 0, errors.New("prompt audit timeout budget exceeds duration range")
+		}
+		endpointBudget := timeout * callCount
+		if endpointBudget > maxRepresentableTimeoutMS-perAttemptMS {
+			return 0, errors.New("prompt audit timeout budget exceeds duration range")
+		}
+		perAttemptMS += endpointBudget
+	}
+	return timeoutBudgetTTLFromPerAttempt(perAttemptMS, maxAttempts)
 }
 
 func timeoutBudgetTTL(timeouts []int64, maxAttempts int) (time.Duration, error) {
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
 	var perAttemptMS int64
 	for _, configuredTimeout := range timeouts {
 		timeout := configuredTimeout
@@ -124,6 +146,13 @@ func timeoutBudgetTTL(timeouts []int64, maxAttempts int) (time.Duration, error) 
 			return 0, errors.New("prompt audit timeout budget exceeds duration range")
 		}
 		perAttemptMS += timeout
+	}
+	return timeoutBudgetTTLFromPerAttempt(perAttemptMS, maxAttempts)
+}
+
+func timeoutBudgetTTLFromPerAttempt(perAttemptMS int64, maxAttempts int) (time.Duration, error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
 	}
 	if perAttemptMS > maxRepresentableTimeoutMS/int64(maxAttempts) {
 		return 0, errors.New("prompt audit timeout budget exceeds duration range")
