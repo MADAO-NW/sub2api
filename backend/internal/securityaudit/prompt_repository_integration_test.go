@@ -205,7 +205,7 @@ func TestPromptAuditPersistsAndReusesThirdPartySegmentResultsPerEndpoint(t *test
 	require.NoError(t, err)
 	require.NotNil(t, current.Event)
 
-	detail, err := repo.GetEvent(ctx, current.Event.ID)
+	detail, err := repo.GetEvent(ctx, current.ID)
 	require.NoError(t, err)
 	require.Len(t, detail.Segments, 1)
 	require.Equal(t, endpoint.ID, detail.Segments[0].EndpointID)
