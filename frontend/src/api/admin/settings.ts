@@ -720,6 +720,13 @@ export interface SystemSettings {
   channel_monitor_hide_throughput?: boolean;
   channel_monitor_show_quota?: boolean;
 
+  // 用户日/周限额跟随上游账号周重置
+  user_quota_follow_account_reset_enabled: boolean;
+  user_quota_follow_account_reset_weekly_enabled: boolean;
+  user_quota_follow_account_reset_daily_enabled: boolean;
+  user_quota_follow_account_reset_min_interval_minutes: number;
+  user_quota_follow_account_reset_max_interval_minutes: number;
+
   // Available Channels feature switch
   available_channels_enabled: boolean;
 
@@ -1018,6 +1025,12 @@ export interface UpdateSettingsRequest {
   channel_monitor_default_interval_seconds?: number;
   channel_monitor_hide_throughput?: boolean;
   channel_monitor_show_quota?: boolean;
+
+  user_quota_follow_account_reset_enabled?: boolean;
+  user_quota_follow_account_reset_weekly_enabled?: boolean;
+  user_quota_follow_account_reset_daily_enabled?: boolean;
+  user_quota_follow_account_reset_min_interval_minutes?: number;
+  user_quota_follow_account_reset_max_interval_minutes?: number;
 
   // Available Channels feature switch
   available_channels_enabled?: boolean;

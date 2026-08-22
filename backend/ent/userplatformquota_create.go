@@ -203,6 +203,34 @@ func (_c *UserPlatformQuotaCreate) SetNillableMonthlyWindowStart(v *time.Time) *
 	return _c
 }
 
+// SetDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field.
+func (_c *UserPlatformQuotaCreate) SetDailyFollowResetBoundary(v time.Time) *UserPlatformQuotaCreate {
+	_c.mutation.SetDailyFollowResetBoundary(v)
+	return _c
+}
+
+// SetNillableDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field if the given value is not nil.
+func (_c *UserPlatformQuotaCreate) SetNillableDailyFollowResetBoundary(v *time.Time) *UserPlatformQuotaCreate {
+	if v != nil {
+		_c.SetDailyFollowResetBoundary(*v)
+	}
+	return _c
+}
+
+// SetWeeklyFollowEnabled sets the "weekly_follow_enabled" field.
+func (_c *UserPlatformQuotaCreate) SetWeeklyFollowEnabled(v bool) *UserPlatformQuotaCreate {
+	_c.mutation.SetWeeklyFollowEnabled(v)
+	return _c
+}
+
+// SetNillableWeeklyFollowEnabled sets the "weekly_follow_enabled" field if the given value is not nil.
+func (_c *UserPlatformQuotaCreate) SetNillableWeeklyFollowEnabled(v *bool) *UserPlatformQuotaCreate {
+	if v != nil {
+		_c.SetWeeklyFollowEnabled(*v)
+	}
+	return _c
+}
+
 // SetUser sets the "user" edge to the User entity.
 func (_c *UserPlatformQuotaCreate) SetUser(v *User) *UserPlatformQuotaCreate {
 	return _c.SetUserID(v.ID)
@@ -271,6 +299,10 @@ func (_c *UserPlatformQuotaCreate) defaults() error {
 		v := userplatformquota.DefaultMonthlyUsageUsd
 		_c.mutation.SetMonthlyUsageUsd(v)
 	}
+	if _, ok := _c.mutation.WeeklyFollowEnabled(); !ok {
+		v := userplatformquota.DefaultWeeklyFollowEnabled
+		_c.mutation.SetWeeklyFollowEnabled(v)
+	}
 	return nil
 }
 
@@ -301,6 +333,9 @@ func (_c *UserPlatformQuotaCreate) check() error {
 	}
 	if _, ok := _c.mutation.MonthlyUsageUsd(); !ok {
 		return &ValidationError{Name: "monthly_usage_usd", err: errors.New(`ent: missing required field "UserPlatformQuota.monthly_usage_usd"`)}
+	}
+	if _, ok := _c.mutation.WeeklyFollowEnabled(); !ok {
+		return &ValidationError{Name: "weekly_follow_enabled", err: errors.New(`ent: missing required field "UserPlatformQuota.weekly_follow_enabled"`)}
 	}
 	if len(_c.mutation.UserIDs()) == 0 {
 		return &ValidationError{Name: "user", err: errors.New(`ent: missing required edge "UserPlatformQuota.user"`)}
@@ -383,6 +418,14 @@ func (_c *UserPlatformQuotaCreate) createSpec() (*UserPlatformQuota, *sqlgraph.C
 	if value, ok := _c.mutation.MonthlyWindowStart(); ok {
 		_spec.SetField(userplatformquota.FieldMonthlyWindowStart, field.TypeTime, value)
 		_node.MonthlyWindowStart = &value
+	}
+	if value, ok := _c.mutation.DailyFollowResetBoundary(); ok {
+		_spec.SetField(userplatformquota.FieldDailyFollowResetBoundary, field.TypeTime, value)
+		_node.DailyFollowResetBoundary = &value
+	}
+	if value, ok := _c.mutation.WeeklyFollowEnabled(); ok {
+		_spec.SetField(userplatformquota.FieldWeeklyFollowEnabled, field.TypeBool, value)
+		_node.WeeklyFollowEnabled = value
 	}
 	if nodes := _c.mutation.UserIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -684,6 +727,36 @@ func (u *UserPlatformQuotaUpsert) UpdateMonthlyWindowStart() *UserPlatformQuotaU
 // ClearMonthlyWindowStart clears the value of the "monthly_window_start" field.
 func (u *UserPlatformQuotaUpsert) ClearMonthlyWindowStart() *UserPlatformQuotaUpsert {
 	u.SetNull(userplatformquota.FieldMonthlyWindowStart)
+	return u
+}
+
+// SetDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field.
+func (u *UserPlatformQuotaUpsert) SetDailyFollowResetBoundary(v time.Time) *UserPlatformQuotaUpsert {
+	u.Set(userplatformquota.FieldDailyFollowResetBoundary, v)
+	return u
+}
+
+// UpdateDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field to the value that was provided on create.
+func (u *UserPlatformQuotaUpsert) UpdateDailyFollowResetBoundary() *UserPlatformQuotaUpsert {
+	u.SetExcluded(userplatformquota.FieldDailyFollowResetBoundary)
+	return u
+}
+
+// ClearDailyFollowResetBoundary clears the value of the "daily_follow_reset_boundary" field.
+func (u *UserPlatformQuotaUpsert) ClearDailyFollowResetBoundary() *UserPlatformQuotaUpsert {
+	u.SetNull(userplatformquota.FieldDailyFollowResetBoundary)
+	return u
+}
+
+// SetWeeklyFollowEnabled sets the "weekly_follow_enabled" field.
+func (u *UserPlatformQuotaUpsert) SetWeeklyFollowEnabled(v bool) *UserPlatformQuotaUpsert {
+	u.Set(userplatformquota.FieldWeeklyFollowEnabled, v)
+	return u
+}
+
+// UpdateWeeklyFollowEnabled sets the "weekly_follow_enabled" field to the value that was provided on create.
+func (u *UserPlatformQuotaUpsert) UpdateWeeklyFollowEnabled() *UserPlatformQuotaUpsert {
+	u.SetExcluded(userplatformquota.FieldWeeklyFollowEnabled)
 	return u
 }
 
@@ -1002,6 +1075,41 @@ func (u *UserPlatformQuotaUpsertOne) UpdateMonthlyWindowStart() *UserPlatformQuo
 func (u *UserPlatformQuotaUpsertOne) ClearMonthlyWindowStart() *UserPlatformQuotaUpsertOne {
 	return u.Update(func(s *UserPlatformQuotaUpsert) {
 		s.ClearMonthlyWindowStart()
+	})
+}
+
+// SetDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field.
+func (u *UserPlatformQuotaUpsertOne) SetDailyFollowResetBoundary(v time.Time) *UserPlatformQuotaUpsertOne {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.SetDailyFollowResetBoundary(v)
+	})
+}
+
+// UpdateDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field to the value that was provided on create.
+func (u *UserPlatformQuotaUpsertOne) UpdateDailyFollowResetBoundary() *UserPlatformQuotaUpsertOne {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.UpdateDailyFollowResetBoundary()
+	})
+}
+
+// ClearDailyFollowResetBoundary clears the value of the "daily_follow_reset_boundary" field.
+func (u *UserPlatformQuotaUpsertOne) ClearDailyFollowResetBoundary() *UserPlatformQuotaUpsertOne {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.ClearDailyFollowResetBoundary()
+	})
+}
+
+// SetWeeklyFollowEnabled sets the "weekly_follow_enabled" field.
+func (u *UserPlatformQuotaUpsertOne) SetWeeklyFollowEnabled(v bool) *UserPlatformQuotaUpsertOne {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.SetWeeklyFollowEnabled(v)
+	})
+}
+
+// UpdateWeeklyFollowEnabled sets the "weekly_follow_enabled" field to the value that was provided on create.
+func (u *UserPlatformQuotaUpsertOne) UpdateWeeklyFollowEnabled() *UserPlatformQuotaUpsertOne {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.UpdateWeeklyFollowEnabled()
 	})
 }
 
@@ -1486,6 +1594,41 @@ func (u *UserPlatformQuotaUpsertBulk) UpdateMonthlyWindowStart() *UserPlatformQu
 func (u *UserPlatformQuotaUpsertBulk) ClearMonthlyWindowStart() *UserPlatformQuotaUpsertBulk {
 	return u.Update(func(s *UserPlatformQuotaUpsert) {
 		s.ClearMonthlyWindowStart()
+	})
+}
+
+// SetDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field.
+func (u *UserPlatformQuotaUpsertBulk) SetDailyFollowResetBoundary(v time.Time) *UserPlatformQuotaUpsertBulk {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.SetDailyFollowResetBoundary(v)
+	})
+}
+
+// UpdateDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field to the value that was provided on create.
+func (u *UserPlatformQuotaUpsertBulk) UpdateDailyFollowResetBoundary() *UserPlatformQuotaUpsertBulk {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.UpdateDailyFollowResetBoundary()
+	})
+}
+
+// ClearDailyFollowResetBoundary clears the value of the "daily_follow_reset_boundary" field.
+func (u *UserPlatformQuotaUpsertBulk) ClearDailyFollowResetBoundary() *UserPlatformQuotaUpsertBulk {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.ClearDailyFollowResetBoundary()
+	})
+}
+
+// SetWeeklyFollowEnabled sets the "weekly_follow_enabled" field.
+func (u *UserPlatformQuotaUpsertBulk) SetWeeklyFollowEnabled(v bool) *UserPlatformQuotaUpsertBulk {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.SetWeeklyFollowEnabled(v)
+	})
+}
+
+// UpdateWeeklyFollowEnabled sets the "weekly_follow_enabled" field to the value that was provided on create.
+func (u *UserPlatformQuotaUpsertBulk) UpdateWeeklyFollowEnabled() *UserPlatformQuotaUpsertBulk {
+	return u.Update(func(s *UserPlatformQuotaUpsert) {
+		s.UpdateWeeklyFollowEnabled()
 	})
 }
 

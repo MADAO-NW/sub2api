@@ -14,6 +14,19 @@ export default {
         payment: 'Payment',
       },
       features: {
+        userQuotaFollowReset: {
+          title: 'Follow Account Resets for User Quotas',
+          description: 'Detect upstream weekly resets by the user’s single exclusive group and platform. Every account in a multi-account group must reset within a five-minute span. Disabled by default.',
+          enabled: 'Enable follow reset',
+          enabledHint: 'When disabled, weekly quotas return to Monday resets and daily quotas keep their normal calendar-day resets.',
+          resetWeekly: 'Reset weekly quota',
+          resetDaily: 'Reset daily quota',
+          scopeHint: 'Only selected quotas are reset. With neither selected, no proactive account probes run.',
+          minInterval: 'Random probe minimum (minutes)',
+          maxInterval: 'Random probe maximum (minutes)',
+          intervalHint: 'After each probe, wait a newly randomized interval within this range. Default: 10–15 minutes.',
+          intervalError: 'Probe intervals must be positive integers and the maximum cannot be below the minimum.',
+        },
         channelMonitor: {
           title: 'Channel Monitor',
           description: 'Choose either V1 active probes or V2 passive usage monitoring. When disabled, both background jobs stop and the user entry is hidden.',

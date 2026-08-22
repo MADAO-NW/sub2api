@@ -152,6 +152,9 @@ type SettingService struct {
 
 	channelMonitorRuntimeListenersMu sync.Mutex
 	channelMonitorRuntimeListeners   []func()
+
+	// userQuotaFollowResetRuntimeCache 保存用户限额跟随账号重置的热路径配置。
+	userQuotaFollowResetRuntimeCache atomic.Value // *UserQuotaFollowResetRuntimeSettings
 }
 
 // DefaultPlatformQuotaSetting 单 platform 三档限额（nil = 沿用上层；0 = 显式禁用；>0 = 上限）

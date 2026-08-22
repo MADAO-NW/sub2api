@@ -186,11 +186,17 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpsMetricsIntervalSeconds:    "60",
 
 		// Channel monitor defaults (enabled, 60s)
-		SettingKeyChannelMonitorEnabled:                "true",
-		SettingKeyChannelMonitorMode:                   ChannelMonitorModeV1,
-		SettingKeyChannelMonitorDefaultIntervalSeconds: "60",
-		SettingKeyChannelMonitorHideThroughput:         "true",
-		SettingKeyChannelMonitorShowQuota:              "false",
+		SettingKeyChannelMonitorEnabled:                         "true",
+		SettingKeyChannelMonitorMode:                            ChannelMonitorModeV1,
+		SettingKeyChannelMonitorDefaultIntervalSeconds:          "60",
+		SettingKeyChannelMonitorHideThroughput:                  "true",
+		SettingKeyChannelMonitorShowQuota:                       "false",
+		SettingKeyUserQuotaFollowAccountResetEnabled:            "false",
+		SettingKeyUserQuotaFollowAccountResetWeeklyEnabled:      "true",
+		SettingKeyUserQuotaFollowAccountResetDailyEnabled:       "false",
+		SettingKeyUserQuotaFollowAccountResetMinIntervalMinutes: "10",
+		SettingKeyUserQuotaFollowAccountResetMaxIntervalMinutes: "15",
+		SettingKeyUserQuotaFollowAccountResetActivationAt:       "",
 
 		// Grok: safe defaults — no cross-vendor model rewrite unless operators enable it.
 		SettingKeyGrokDefaultTextModel:           "grok-4.5",
@@ -802,6 +808,21 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	// 配额展示默认关闭且 fail-closed：仅字面 "true" 视为开启
 	// （与 setting_public.go 公开读取路径保持一致）。
 	result.ChannelMonitorShowQuota = settings[SettingKeyChannelMonitorShowQuota] == "true"
+
+	// 用户限额跟随账号重置（默认关闭，默认仅勾选周限额，检测间隔 10~15 分钟）。
+	result.UserQuotaFollowAccountResetEnabled = settings[SettingKeyUserQuotaFollowAccountResetEnabled] == "true"
+	result.UserQuotaFollowAccountResetWeeklyEnabled = !isFalseSettingValue(settings[SettingKeyUserQuotaFollowAccountResetWeeklyEnabled])
+	result.UserQuotaFollowAccountResetDailyEnabled = settings[SettingKeyUserQuotaFollowAccountResetDailyEnabled] == "true"
+	result.UserQuotaFollowAccountResetMinIntervalMinutes = parsePositiveIntSetting(
+		settings[SettingKeyUserQuotaFollowAccountResetMinIntervalMinutes], 10,
+	)
+	result.UserQuotaFollowAccountResetMaxIntervalMinutes = parsePositiveIntSetting(
+		settings[SettingKeyUserQuotaFollowAccountResetMaxIntervalMinutes], 15,
+	)
+	if result.UserQuotaFollowAccountResetMaxIntervalMinutes < result.UserQuotaFollowAccountResetMinIntervalMinutes {
+		result.UserQuotaFollowAccountResetMaxIntervalMinutes = result.UserQuotaFollowAccountResetMinIntervalMinutes
+	}
+	result.UserQuotaFollowAccountResetActivationAt = strings.TrimSpace(settings[SettingKeyUserQuotaFollowAccountResetActivationAt])
 
 	// Grok default mapping policy
 	result.GrokDefaultTextModel = strings.TrimSpace(settings[SettingKeyGrokDefaultTextModel])

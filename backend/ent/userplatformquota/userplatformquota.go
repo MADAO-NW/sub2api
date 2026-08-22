@@ -43,6 +43,10 @@ const (
 	FieldWeeklyWindowStart = "weekly_window_start"
 	// FieldMonthlyWindowStart holds the string denoting the monthly_window_start field in the database.
 	FieldMonthlyWindowStart = "monthly_window_start"
+	// FieldDailyFollowResetBoundary holds the string denoting the daily_follow_reset_boundary field in the database.
+	FieldDailyFollowResetBoundary = "daily_follow_reset_boundary"
+	// FieldWeeklyFollowEnabled holds the string denoting the weekly_follow_enabled field in the database.
+	FieldWeeklyFollowEnabled = "weekly_follow_enabled"
 	// EdgeUser holds the string denoting the user edge name in mutations.
 	EdgeUser = "user"
 	// Table holds the table name of the userplatformquota in the database.
@@ -73,6 +77,8 @@ var Columns = []string{
 	FieldDailyWindowStart,
 	FieldWeeklyWindowStart,
 	FieldMonthlyWindowStart,
+	FieldDailyFollowResetBoundary,
+	FieldWeeklyFollowEnabled,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -107,6 +113,8 @@ var (
 	DefaultWeeklyUsageUsd float64
 	// DefaultMonthlyUsageUsd holds the default value on creation for the "monthly_usage_usd" field.
 	DefaultMonthlyUsageUsd float64
+	// DefaultWeeklyFollowEnabled holds the default value on creation for the "weekly_follow_enabled" field.
+	DefaultWeeklyFollowEnabled bool
 )
 
 // OrderOption defines the ordering options for the UserPlatformQuota queries.
@@ -185,6 +193,16 @@ func ByWeeklyWindowStart(opts ...sql.OrderTermOption) OrderOption {
 // ByMonthlyWindowStart orders the results by the monthly_window_start field.
 func ByMonthlyWindowStart(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMonthlyWindowStart, opts...).ToFunc()
+}
+
+// ByDailyFollowResetBoundary orders the results by the daily_follow_reset_boundary field.
+func ByDailyFollowResetBoundary(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDailyFollowResetBoundary, opts...).ToFunc()
+}
+
+// ByWeeklyFollowEnabled orders the results by the weekly_follow_enabled field.
+func ByWeeklyFollowEnabled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWeeklyFollowEnabled, opts...).ToFunc()
 }
 
 // ByUserField orders the results by user field.

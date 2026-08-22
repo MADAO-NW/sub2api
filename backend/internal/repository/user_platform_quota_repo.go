@@ -16,17 +16,19 @@ import (
 // UserPlatformQuotaRecord 是 repository 层的传输结构体，
 // 与 ent.UserPlatformQuota 实体解耦，供业务层使用。
 type UserPlatformQuotaRecord struct {
-	UserID             int64
-	Platform           string
-	DailyLimitUSD      *float64
-	WeeklyLimitUSD     *float64
-	MonthlyLimitUSD    *float64
-	DailyUsageUSD      float64
-	WeeklyUsageUSD     float64
-	MonthlyUsageUSD    float64
-	DailyWindowStart   *time.Time
-	WeeklyWindowStart  *time.Time
-	MonthlyWindowStart *time.Time
+	UserID                   int64
+	Platform                 string
+	DailyLimitUSD            *float64
+	WeeklyLimitUSD           *float64
+	MonthlyLimitUSD          *float64
+	DailyUsageUSD            float64
+	WeeklyUsageUSD           float64
+	MonthlyUsageUSD          float64
+	DailyWindowStart         *time.Time
+	WeeklyWindowStart        *time.Time
+	MonthlyWindowStart       *time.Time
+	DailyFollowResetBoundary *time.Time
+	WeeklyFollowEnabled      bool
 }
 
 // ErrUserPlatformQuotaNotFound 用于 ResetExpiredWindow 等需要"必须命中已有记录"的方法。
@@ -38,14 +40,15 @@ var ErrUserPlatformQuotaFKViolation = errors.New("user platform quota snapshot F
 // UserPlatformQuotaSnapshot 是 BatchSnapshotUsage 的输入结构体，
 // 表示 Redis 当前窗口快照（用于绝对值覆盖写入 DB）。
 type UserPlatformQuotaSnapshot struct {
-	UserID             int64
-	Platform           string
-	DailyUsageUSD      float64
-	WeeklyUsageUSD     float64
-	MonthlyUsageUSD    float64
-	DailyWindowStart   time.Time
-	WeeklyWindowStart  time.Time
-	MonthlyWindowStart time.Time
+	UserID                   int64
+	Platform                 string
+	DailyUsageUSD            float64
+	WeeklyUsageUSD           float64
+	MonthlyUsageUSD          float64
+	DailyWindowStart         time.Time
+	WeeklyWindowStart        time.Time
+	MonthlyWindowStart       time.Time
+	DailyFollowResetBoundary *time.Time
 }
 
 // UserPlatformQuotaRepository 定义用户平台配额的数据访问接口。
@@ -212,7 +215,16 @@ func (r *userPlatformQuotaRepository) IncrementUsageWithReset(ctx context.Contex
 		}
 
 		newDaily := maybeReset(existing.DailyUsageUsd, existing.DailyWindowStart, timezone.StartOfDay(now), cost)
-		newWeekly := maybeReset(existing.WeeklyUsageUsd, existing.WeeklyWindowStart, timezone.StartOfWeek(now), cost)
+		weeklyWindowStart := timezone.StartOfWeek(now)
+		newWeekly := maybeReset(existing.WeeklyUsageUsd, existing.WeeklyWindowStart, weeklyWindowStart, cost)
+		if existing.WeeklyFollowEnabled {
+			newWeekly = existing.WeeklyUsageUsd + cost
+			if existing.WeeklyWindowStart != nil {
+				weeklyWindowStart = *existing.WeeklyWindowStart
+			} else {
+				weeklyWindowStart = now
+			}
+		}
 		// 30 天滚动月度窗口：过期时重置为 cost 并以 now 为新起始，否则累加保留原起始
 		newMonthly, newMonthlyStart := monthlyMaybeReset(existing.MonthlyUsageUsd, existing.MonthlyWindowStart, cost, now)
 
@@ -221,7 +233,7 @@ func (r *userPlatformQuotaRepository) IncrementUsageWithReset(ctx context.Contex
 			SetWeeklyUsageUsd(newWeekly).
 			SetMonthlyUsageUsd(newMonthly).
 			SetDailyWindowStart(timezone.StartOfDay(now)).
-			SetWeeklyWindowStart(timezone.StartOfWeek(now)).
+			SetWeeklyWindowStart(weeklyWindowStart).
 			SetMonthlyWindowStart(newMonthlyStart). // 30 天滚动：仅过期时更新起始
 			Save(txCtx)
 		return e
@@ -251,7 +263,7 @@ func (r *userPlatformQuotaRepository) ResetExpiredWindow(ctx context.Context, us
 		)
 	switch window {
 	case "daily":
-		upd = upd.SetDailyUsageUsd(0).SetDailyWindowStart(newStart)
+		upd = upd.SetDailyUsageUsd(0).SetDailyWindowStart(newStart).SetDailyFollowResetBoundary(newStart)
 	case "weekly":
 		upd = upd.SetWeeklyUsageUsd(0).SetWeeklyWindowStart(newStart)
 	case "monthly":
@@ -296,17 +308,19 @@ func (r *userPlatformQuotaRepository) withTx(ctx context.Context, fn func(txCtx 
 // 注意 ent 生成字段名为 DailyLimitUsd（非 DailyLimitUSD）。
 func entQuotaToRecord(e *dbent.UserPlatformQuota) *UserPlatformQuotaRecord {
 	return &UserPlatformQuotaRecord{
-		UserID:             e.UserID,
-		Platform:           e.Platform,
-		DailyLimitUSD:      e.DailyLimitUsd,
-		WeeklyLimitUSD:     e.WeeklyLimitUsd,
-		MonthlyLimitUSD:    e.MonthlyLimitUsd,
-		DailyUsageUSD:      e.DailyUsageUsd,
-		WeeklyUsageUSD:     e.WeeklyUsageUsd,
-		MonthlyUsageUSD:    e.MonthlyUsageUsd,
-		DailyWindowStart:   e.DailyWindowStart,
-		WeeklyWindowStart:  e.WeeklyWindowStart,
-		MonthlyWindowStart: e.MonthlyWindowStart,
+		UserID:                   e.UserID,
+		Platform:                 e.Platform,
+		DailyLimitUSD:            e.DailyLimitUsd,
+		WeeklyLimitUSD:           e.WeeklyLimitUsd,
+		MonthlyLimitUSD:          e.MonthlyLimitUsd,
+		DailyUsageUSD:            e.DailyUsageUsd,
+		WeeklyUsageUSD:           e.WeeklyUsageUsd,
+		MonthlyUsageUSD:          e.MonthlyUsageUsd,
+		DailyWindowStart:         e.DailyWindowStart,
+		WeeklyWindowStart:        e.WeeklyWindowStart,
+		MonthlyWindowStart:       e.MonthlyWindowStart,
+		DailyFollowResetBoundary: e.DailyFollowResetBoundary,
+		WeeklyFollowEnabled:      e.WeeklyFollowEnabled,
 	}
 }
 
@@ -467,33 +481,35 @@ func (r *userPlatformQuotaRepository) BatchSnapshotUsage(ctx context.Context, sn
 		_, _ = sb.WriteString(
 			"INSERT INTO user_platform_quotas" +
 				" (user_id, platform, daily_usage_usd, weekly_usage_usd, monthly_usage_usd," +
-				" daily_window_start, weekly_window_start, monthly_window_start, created_at, updated_at)" +
+				" daily_window_start, weekly_window_start, monthly_window_start, daily_follow_reset_boundary, created_at, updated_at)" +
 				" VALUES ")
 
-		// $1 = now（共用）；每行 8 个 per-row 参，从 $2 起连续编号。
+		// $1 = now（共用）；每行 9 个 per-row 参，从 $2 起连续编号。
 		args := []any{now}
 		for i, s := range batch {
 			if i > 0 {
 				_, _ = sb.WriteString(",")
 			}
 			b := len(args) // 当前 per-row 第一个参数的 0-based 索引，实际占位符 = b+1
-			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$1,$1)",
-				b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8)
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$1,$1)",
+				b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8, b+9)
 			args = append(args,
 				s.UserID, s.Platform,
 				s.DailyUsageUSD, s.WeeklyUsageUSD, s.MonthlyUsageUSD,
 				s.DailyWindowStart, s.WeeklyWindowStart, s.MonthlyWindowStart,
+				s.DailyFollowResetBoundary,
 			)
 		}
 
 		_, _ = sb.WriteString(
 			" ON CONFLICT (user_id, platform) WHERE deleted_at IS NULL DO UPDATE SET" +
-				"  daily_usage_usd      = EXCLUDED.daily_usage_usd," +
-				"  weekly_usage_usd     = EXCLUDED.weekly_usage_usd," +
+				"  daily_usage_usd      = CASE WHEN user_platform_quotas.daily_window_start > EXCLUDED.daily_window_start OR COALESCE(user_platform_quotas.daily_follow_reset_boundary, '-infinity'::timestamptz) > COALESCE(EXCLUDED.daily_follow_reset_boundary, '-infinity'::timestamptz) THEN user_platform_quotas.daily_usage_usd ELSE EXCLUDED.daily_usage_usd END," +
+				"  weekly_usage_usd     = CASE WHEN user_platform_quotas.weekly_window_start > EXCLUDED.weekly_window_start THEN user_platform_quotas.weekly_usage_usd ELSE EXCLUDED.weekly_usage_usd END," +
 				"  monthly_usage_usd    = EXCLUDED.monthly_usage_usd," +
-				"  daily_window_start   = EXCLUDED.daily_window_start," +
-				"  weekly_window_start  = EXCLUDED.weekly_window_start," +
+				"  daily_window_start   = GREATEST(user_platform_quotas.daily_window_start, EXCLUDED.daily_window_start)," +
+				"  weekly_window_start  = GREATEST(user_platform_quotas.weekly_window_start, EXCLUDED.weekly_window_start)," +
 				"  monthly_window_start = EXCLUDED.monthly_window_start," +
+				"  daily_follow_reset_boundary = CASE WHEN user_platform_quotas.daily_follow_reset_boundary IS NULL THEN EXCLUDED.daily_follow_reset_boundary WHEN EXCLUDED.daily_follow_reset_boundary IS NULL THEN user_platform_quotas.daily_follow_reset_boundary ELSE GREATEST(user_platform_quotas.daily_follow_reset_boundary, EXCLUDED.daily_follow_reset_boundary) END," +
 				"  updated_at           = EXCLUDED.updated_at")
 
 		if _, err := client.ExecContext(ctx, sb.String(), args...); err != nil {

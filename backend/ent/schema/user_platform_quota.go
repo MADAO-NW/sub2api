@@ -90,6 +90,14 @@ func (UserPlatformQuota) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
+		// 上次已消费的账号周重置边界；不替代自然日窗口起点。
+		field.Time("daily_follow_reset_boundary").
+			Optional().
+			Nillable().
+			SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
+		// 当前请求链路是否应停用固定周一重置，改由账号重置事件推进。
+		field.Bool("weekly_follow_enabled").
+			Default(false),
 	}
 }
 

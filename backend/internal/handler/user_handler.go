@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -22,6 +23,12 @@ type UserHandler struct {
 	emailCache            service.EmailCache
 	affiliateService      *service.AffiliateService
 	userPlatformQuotaRepo service.UserPlatformQuotaRepository
+	userQuotaFollowReset  service.UserQuotaFollowResetApplier
+}
+
+// SetUserQuotaFollowResetApplier 注入额度视图使用的账号重置事件消费器。
+func (h *UserHandler) SetUserQuotaFollowResetApplier(applier service.UserQuotaFollowResetApplier) {
+	h.userQuotaFollowReset = applier
 }
 
 // NewUserHandler creates a new UserHandler
@@ -62,6 +69,24 @@ func (h *UserHandler) GetMyPlatformQuotas(c *gin.Context) {
 		return
 	}
 	now := time.Now().UTC()
+	changed := false
+	if h.userQuotaFollowReset != nil {
+		for _, record := range records {
+			result, applyErr := h.userQuotaFollowReset.ApplyUserQuotaReset(c.Request.Context(), subject.UserID, record.Platform, now)
+			if applyErr != nil {
+				slog.Warn("user_quota_view_follow_reset_failed", "user_id", subject.UserID, "platform", record.Platform, "error", applyErr)
+				continue
+			}
+			changed = changed || result.Changed
+		}
+	}
+	if changed {
+		records, err = h.userPlatformQuotaRepo.ListByUser(c.Request.Context(), subject.UserID)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
 	out := make([]map[string]any, 0, len(records))
 	for _, r := range records {
 		out = append(out, quotaview.LazyZeroQuotaForResponse(r, now, false))

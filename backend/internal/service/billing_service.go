@@ -29,15 +29,16 @@ type UserPlatformQuotaKey struct {
 	Platform string
 }
 
+// UserPlatformQuotaCacheSchemaV1 是历史沿用名称，当前值 2 包含跟随重置字段。
+const UserPlatformQuotaCacheSchemaV1 = int64(2)
+
 // UserPlatformQuotaCacheEntry Redis hash 反序列化结果。
 //
 // SchemaVersion 用于向后兼容：
 //   - 0（旧 entry，无 SchemaVersion 字段）→ 视为 cache MISS，强制 refresh
-//   - 1（当前版本）→ 包含 limits 和 window_start，可免 DB 查询
+//   - 2（当前版本）→ 额外包含跟随重置边界与周窗口策略
 //
 // limit 字段为 nil 表示"无限额"（DB 中对应列为 NULL）。
-const UserPlatformQuotaCacheSchemaV1 = int64(1)
-
 type UserPlatformQuotaCacheEntry struct {
 	DailyUsageUSD   float64
 	WeeklyUsageUSD  float64
@@ -50,9 +51,11 @@ type UserPlatformQuotaCacheEntry struct {
 	WeeklyLimitUSD  *float64
 	MonthlyLimitUSD *float64
 
-	DailyWindowStart   *time.Time
-	WeeklyWindowStart  *time.Time
-	MonthlyWindowStart *time.Time
+	DailyWindowStart         *time.Time
+	WeeklyWindowStart        *time.Time
+	MonthlyWindowStart       *time.Time
+	DailyFollowResetBoundary *time.Time
+	WeeklyFollowEnabled      bool
 }
 
 // BillingCache defines cache operations for billing service

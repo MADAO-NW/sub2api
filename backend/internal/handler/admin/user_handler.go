@@ -34,6 +34,12 @@ type UserHandler struct {
 	totpService           *service.TotpService                // 角色提升为管理员的 step-up 门控
 	userService           *service.UserService
 	settingService        *service.SettingService // step-up 功能开关
+	userQuotaFollowReset  service.UserQuotaFollowResetApplier
+}
+
+// SetUserQuotaFollowResetApplier 注入管理员额度视图使用的账号重置事件消费器。
+func (h *UserHandler) SetUserQuotaFollowResetApplier(applier service.UserQuotaFollowResetApplier) {
+	h.userQuotaFollowReset = applier
 }
 
 // NewUserHandler creates a new admin user handler
@@ -700,6 +706,24 @@ func (h *UserHandler) GetUserPlatformQuotas(c *gin.Context) {
 		return
 	}
 	now := time.Now().UTC()
+	changed := false
+	if h.userQuotaFollowReset != nil {
+		for _, record := range records {
+			result, applyErr := h.userQuotaFollowReset.ApplyUserQuotaReset(c.Request.Context(), userID, record.Platform, now)
+			if applyErr != nil {
+				slog.Warn("admin_user_quota_view_follow_reset_failed", "user_id", userID, "platform", record.Platform, "error", applyErr)
+				continue
+			}
+			changed = changed || result.Changed
+		}
+	}
+	if changed {
+		records, err = h.userPlatformQuotaRepo.ListByUser(c.Request.Context(), userID)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
 	out := make([]map[string]any, 0, len(records))
 	for _, r := range records {
 		out = append(out, quotaview.LazyZeroQuotaForResponse(r, now, true)) // true = 暴露 window_start

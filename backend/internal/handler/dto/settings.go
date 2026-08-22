@@ -301,11 +301,16 @@ type SystemSettings struct {
 	AccountQuotaNotifyEmails        []NotifyEmailEntry `json:"account_quota_notify_emails"`
 
 	// Channel Monitor feature switch
-	ChannelMonitorEnabled                bool   `json:"channel_monitor_enabled"`
-	ChannelMonitorMode                   string `json:"channel_monitor_mode"`
-	ChannelMonitorDefaultIntervalSeconds int    `json:"channel_monitor_default_interval_seconds"`
-	ChannelMonitorHideThroughput         bool   `json:"channel_monitor_hide_throughput"`
-	ChannelMonitorShowQuota              bool   `json:"channel_monitor_show_quota"`
+	ChannelMonitorEnabled                         bool   `json:"channel_monitor_enabled"`
+	ChannelMonitorMode                            string `json:"channel_monitor_mode"`
+	ChannelMonitorDefaultIntervalSeconds          int    `json:"channel_monitor_default_interval_seconds"`
+	ChannelMonitorHideThroughput                  bool   `json:"channel_monitor_hide_throughput"`
+	ChannelMonitorShowQuota                       bool   `json:"channel_monitor_show_quota"`
+	UserQuotaFollowAccountResetEnabled            bool   `json:"user_quota_follow_account_reset_enabled"`
+	UserQuotaFollowAccountResetWeeklyEnabled      bool   `json:"user_quota_follow_account_reset_weekly_enabled"`
+	UserQuotaFollowAccountResetDailyEnabled       bool   `json:"user_quota_follow_account_reset_daily_enabled"`
+	UserQuotaFollowAccountResetMinIntervalMinutes int    `json:"user_quota_follow_account_reset_min_interval_minutes"`
+	UserQuotaFollowAccountResetMaxIntervalMinutes int    `json:"user_quota_follow_account_reset_max_interval_minutes"`
 
 	// Grok model mapping policy (admin settings; empty account mapping falls back to these).
 	GrokDefaultTextModel           string `json:"grok_default_text_model"`
@@ -415,8 +420,7 @@ type PublicSettings struct {
 	ChannelMonitorDefaultIntervalSeconds int    `json:"channel_monitor_default_interval_seconds"`
 	ChannelMonitorHideThroughput         bool   `json:"channel_monitor_hide_throughput"`
 	ChannelMonitorShowQuota              bool   `json:"channel_monitor_show_quota"`
-
-	AvailableChannelsEnabled bool `json:"available_channels_enabled"`
+	AvailableChannelsEnabled             bool   `json:"available_channels_enabled"`
 
 	ModelPlazaEnabled     bool `json:"model_plaza_enabled"`
 	ModelPlazaRequireAuth bool `json:"model_plaza_require_auth"`

@@ -287,6 +287,40 @@ func (_u *UserPlatformQuotaUpdate) ClearMonthlyWindowStart() *UserPlatformQuotaU
 	return _u
 }
 
+// SetDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field.
+func (_u *UserPlatformQuotaUpdate) SetDailyFollowResetBoundary(v time.Time) *UserPlatformQuotaUpdate {
+	_u.mutation.SetDailyFollowResetBoundary(v)
+	return _u
+}
+
+// SetNillableDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field if the given value is not nil.
+func (_u *UserPlatformQuotaUpdate) SetNillableDailyFollowResetBoundary(v *time.Time) *UserPlatformQuotaUpdate {
+	if v != nil {
+		_u.SetDailyFollowResetBoundary(*v)
+	}
+	return _u
+}
+
+// ClearDailyFollowResetBoundary clears the value of the "daily_follow_reset_boundary" field.
+func (_u *UserPlatformQuotaUpdate) ClearDailyFollowResetBoundary() *UserPlatformQuotaUpdate {
+	_u.mutation.ClearDailyFollowResetBoundary()
+	return _u
+}
+
+// SetWeeklyFollowEnabled sets the "weekly_follow_enabled" field.
+func (_u *UserPlatformQuotaUpdate) SetWeeklyFollowEnabled(v bool) *UserPlatformQuotaUpdate {
+	_u.mutation.SetWeeklyFollowEnabled(v)
+	return _u
+}
+
+// SetNillableWeeklyFollowEnabled sets the "weekly_follow_enabled" field if the given value is not nil.
+func (_u *UserPlatformQuotaUpdate) SetNillableWeeklyFollowEnabled(v *bool) *UserPlatformQuotaUpdate {
+	if v != nil {
+		_u.SetWeeklyFollowEnabled(*v)
+	}
+	return _u
+}
+
 // SetUser sets the "user" edge to the User entity.
 func (_u *UserPlatformQuotaUpdate) SetUser(v *User) *UserPlatformQuotaUpdate {
 	return _u.SetUserID(v.ID)
@@ -444,6 +478,15 @@ func (_u *UserPlatformQuotaUpdate) sqlSave(ctx context.Context) (_node int, err 
 	}
 	if _u.mutation.MonthlyWindowStartCleared() {
 		_spec.ClearField(userplatformquota.FieldMonthlyWindowStart, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DailyFollowResetBoundary(); ok {
+		_spec.SetField(userplatformquota.FieldDailyFollowResetBoundary, field.TypeTime, value)
+	}
+	if _u.mutation.DailyFollowResetBoundaryCleared() {
+		_spec.ClearField(userplatformquota.FieldDailyFollowResetBoundary, field.TypeTime)
+	}
+	if value, ok := _u.mutation.WeeklyFollowEnabled(); ok {
+		_spec.SetField(userplatformquota.FieldWeeklyFollowEnabled, field.TypeBool, value)
 	}
 	if _u.mutation.UserCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -752,6 +795,40 @@ func (_u *UserPlatformQuotaUpdateOne) ClearMonthlyWindowStart() *UserPlatformQuo
 	return _u
 }
 
+// SetDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field.
+func (_u *UserPlatformQuotaUpdateOne) SetDailyFollowResetBoundary(v time.Time) *UserPlatformQuotaUpdateOne {
+	_u.mutation.SetDailyFollowResetBoundary(v)
+	return _u
+}
+
+// SetNillableDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field if the given value is not nil.
+func (_u *UserPlatformQuotaUpdateOne) SetNillableDailyFollowResetBoundary(v *time.Time) *UserPlatformQuotaUpdateOne {
+	if v != nil {
+		_u.SetDailyFollowResetBoundary(*v)
+	}
+	return _u
+}
+
+// ClearDailyFollowResetBoundary clears the value of the "daily_follow_reset_boundary" field.
+func (_u *UserPlatformQuotaUpdateOne) ClearDailyFollowResetBoundary() *UserPlatformQuotaUpdateOne {
+	_u.mutation.ClearDailyFollowResetBoundary()
+	return _u
+}
+
+// SetWeeklyFollowEnabled sets the "weekly_follow_enabled" field.
+func (_u *UserPlatformQuotaUpdateOne) SetWeeklyFollowEnabled(v bool) *UserPlatformQuotaUpdateOne {
+	_u.mutation.SetWeeklyFollowEnabled(v)
+	return _u
+}
+
+// SetNillableWeeklyFollowEnabled sets the "weekly_follow_enabled" field if the given value is not nil.
+func (_u *UserPlatformQuotaUpdateOne) SetNillableWeeklyFollowEnabled(v *bool) *UserPlatformQuotaUpdateOne {
+	if v != nil {
+		_u.SetWeeklyFollowEnabled(*v)
+	}
+	return _u
+}
+
 // SetUser sets the "user" edge to the User entity.
 func (_u *UserPlatformQuotaUpdateOne) SetUser(v *User) *UserPlatformQuotaUpdateOne {
 	return _u.SetUserID(v.ID)
@@ -939,6 +1016,15 @@ func (_u *UserPlatformQuotaUpdateOne) sqlSave(ctx context.Context) (_node *UserP
 	}
 	if _u.mutation.MonthlyWindowStartCleared() {
 		_spec.ClearField(userplatformquota.FieldMonthlyWindowStart, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DailyFollowResetBoundary(); ok {
+		_spec.SetField(userplatformquota.FieldDailyFollowResetBoundary, field.TypeTime, value)
+	}
+	if _u.mutation.DailyFollowResetBoundaryCleared() {
+		_spec.ClearField(userplatformquota.FieldDailyFollowResetBoundary, field.TypeTime)
+	}
+	if value, ok := _u.mutation.WeeklyFollowEnabled(); ok {
+		_spec.SetField(userplatformquota.FieldWeeklyFollowEnabled, field.TypeBool, value)
 	}
 	if _u.mutation.UserCleared() {
 		edge := &sqlgraph.EdgeSpec{

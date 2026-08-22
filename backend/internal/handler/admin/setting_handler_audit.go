@@ -573,6 +573,21 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.ChannelMonitorDefaultIntervalSeconds != after.ChannelMonitorDefaultIntervalSeconds {
 		changed = append(changed, "channel_monitor_default_interval_seconds")
 	}
+	if before.UserQuotaFollowAccountResetEnabled != after.UserQuotaFollowAccountResetEnabled {
+		changed = append(changed, "user_quota_follow_account_reset_enabled")
+	}
+	if before.UserQuotaFollowAccountResetWeeklyEnabled != after.UserQuotaFollowAccountResetWeeklyEnabled {
+		changed = append(changed, "user_quota_follow_account_reset_weekly_enabled")
+	}
+	if before.UserQuotaFollowAccountResetDailyEnabled != after.UserQuotaFollowAccountResetDailyEnabled {
+		changed = append(changed, "user_quota_follow_account_reset_daily_enabled")
+	}
+	if before.UserQuotaFollowAccountResetMinIntervalMinutes != after.UserQuotaFollowAccountResetMinIntervalMinutes {
+		changed = append(changed, "user_quota_follow_account_reset_min_interval_minutes")
+	}
+	if before.UserQuotaFollowAccountResetMaxIntervalMinutes != after.UserQuotaFollowAccountResetMaxIntervalMinutes {
+		changed = append(changed, "user_quota_follow_account_reset_max_interval_minutes")
+	}
 	if before.AvailableChannelsEnabled != after.AvailableChannelsEnabled {
 		changed = append(changed, "available_channels_enabled")
 	}
