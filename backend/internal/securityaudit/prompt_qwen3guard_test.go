@@ -68,7 +68,8 @@ func TestBuildGuardPayloadAppliesRolePromptOnlyToThirdParty(t *testing.T) {
 		AuditPrompt: "audit policy", RolePrompt: "role rule",
 	}, "")
 	require.NoError(t, err)
-	thirdMessages := third["messages"].([]map[string]string)
+	thirdMessages, ok := third["messages"].([]map[string]string)
+	require.True(t, ok)
 	require.Equal(t, "audit policy\n\nrole rule\n\n"+FixedOutputPrompt, thirdMessages[0]["content"])
 
 	qwen, err := buildGuardPayload(ModelScanRequest{

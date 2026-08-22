@@ -35,13 +35,7 @@ func (r *PostgreSQLRepository) FindReusableSegments(
 	inputs := make([]lookupInput, 0, len(keys))
 	keysByID := make(map[string]SegmentReuseKey, len(keys))
 	for _, key := range keys {
-		inputs = append(inputs, lookupInput{
-			LookupKey: key.LookupKey, ContentHash: key.ContentHash, PolicyRole: key.PolicyRole,
-			TurnScope: key.TurnScope, EndpointID: key.EndpointID, Adapter: key.Adapter,
-			ConfigVersion: key.ConfigVersion, AuditPromptHash: key.AuditPromptHash,
-			RolePromptHash: key.RolePromptHash, EvaluationContractVersion: key.EvaluationContractVersion,
-			PromptContractVersion: key.PromptContractVersion,
-		})
+		inputs = append(inputs, lookupInput(key))
 		keysByID[key.LookupKey] = key
 	}
 	raw, err := json.Marshal(inputs)

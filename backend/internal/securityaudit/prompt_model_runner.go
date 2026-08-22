@@ -94,7 +94,7 @@ func runOrderedModels(
 			joint = evaluation.Joint
 		} else {
 			wholeModelCalls++
-			result, scanErr, modelAttempts = executeModelCall(ctx, cfg, endpoint, fullPrompt, "", before, scan)
+			result, modelAttempts, scanErr = executeModelCall(ctx, cfg, endpoint, fullPrompt, "", before, scan)
 		}
 		if errors.Is(scanErr, ErrLeaseLost) {
 			return nil, ErrLeaseLost
@@ -204,7 +204,7 @@ func evaluateThirdPartyEndpoint(
 				evaluation.HistoryHits++
 			} else {
 				evaluation.SegmentCalls++
-				modelResult, err, attempts := executeModelCall(
+				modelResult, attempts, err := executeModelCall(
 					ctx, cfg, endpoint, segmentPromptJSON(segment), rolePromptForSegment(segment), before, scan,
 				)
 				evaluation.Attempts = append(evaluation.Attempts, attempts...)
@@ -268,7 +268,7 @@ func evaluateThirdPartyEndpoint(
 	default:
 		evaluation.JointCalls = 1
 		evaluation.Joint = &ModelJointEvaluation{Executed: true, Trigger: jointTrigger}
-		jointResult, err, attempts := executeModelCall(
+		jointResult, attempts, err := executeModelCall(
 			ctx, cfg, endpoint, jointPromptJSON(jointSegments), roleJointRule, before, scan,
 		)
 		evaluation.Attempts = append(evaluation.Attempts, attempts...)
@@ -298,15 +298,15 @@ func executeModelCall(
 	rolePrompt string,
 	before beforeModelCall,
 	scan modelScannerCall,
-) (*NormalizedResult, error, []ModelCallAttempt) {
+) (*NormalizedResult, []ModelCallAttempt, error) {
 	if before != nil {
 		if err := before(ctx, endpoint); err != nil {
-			return nil, err, nil
+			return nil, nil, err
 		}
 	}
 	timeout, err := timeoutDuration(endpoint.TimeoutMS)
 	if err != nil {
-		return nil, &GuardError{Code: ErrorCodeInvalidResponse, DetailCode: "invalid_timeout", Cause: err}, nil
+		return nil, nil, &GuardError{Code: ErrorCodeInvalidResponse, DetailCode: "invalid_timeout", Cause: err}
 	}
 	modelCtx, cancel := context.WithTimeout(ctx, timeout)
 	result, scanErr := scan(modelCtx, ModelScanRequest{
@@ -326,7 +326,7 @@ func executeModelCall(
 	if errors.As(scanErr, &guardErr) {
 		attempts = append(attempts, guardErr.Attempts...)
 	}
-	return result, scanErr, attempts
+	return result, attempts, scanErr
 }
 
 func normalizedEndpointResult(endpointID string, decision EventDecision, action Action, categories []string) *NormalizedResult {
