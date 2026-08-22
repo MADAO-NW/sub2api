@@ -53590,34 +53590,36 @@ func (m *UserAttributeValueMutation) ResetEdge(name string) error {
 // UserPlatformQuotaMutation represents an operation that mutates the UserPlatformQuota nodes in the graph.
 type UserPlatformQuotaMutation struct {
 	config
-	op                   Op
-	typ                  string
-	id                   *int64
-	created_at           *time.Time
-	updated_at           *time.Time
-	deleted_at           *time.Time
-	platform             *string
-	daily_limit_usd      *float64
-	adddaily_limit_usd   *float64
-	weekly_limit_usd     *float64
-	addweekly_limit_usd  *float64
-	monthly_limit_usd    *float64
-	addmonthly_limit_usd *float64
-	daily_usage_usd      *float64
-	adddaily_usage_usd   *float64
-	weekly_usage_usd     *float64
-	addweekly_usage_usd  *float64
-	monthly_usage_usd    *float64
-	addmonthly_usage_usd *float64
-	daily_window_start   *time.Time
-	weekly_window_start  *time.Time
-	monthly_window_start *time.Time
-	clearedFields        map[string]struct{}
-	user                 *int64
-	cleareduser          bool
-	done                 bool
-	oldValue             func(context.Context) (*UserPlatformQuota, error)
-	predicates           []predicate.UserPlatformQuota
+	op                          Op
+	typ                         string
+	id                          *int64
+	created_at                  *time.Time
+	updated_at                  *time.Time
+	deleted_at                  *time.Time
+	platform                    *string
+	daily_limit_usd             *float64
+	adddaily_limit_usd          *float64
+	weekly_limit_usd            *float64
+	addweekly_limit_usd         *float64
+	monthly_limit_usd           *float64
+	addmonthly_limit_usd        *float64
+	daily_usage_usd             *float64
+	adddaily_usage_usd          *float64
+	weekly_usage_usd            *float64
+	addweekly_usage_usd         *float64
+	monthly_usage_usd           *float64
+	addmonthly_usage_usd        *float64
+	daily_window_start          *time.Time
+	weekly_window_start         *time.Time
+	monthly_window_start        *time.Time
+	daily_follow_reset_boundary *time.Time
+	weekly_follow_enabled       *bool
+	clearedFields               map[string]struct{}
+	user                        *int64
+	cleareduser                 bool
+	done                        bool
+	oldValue                    func(context.Context) (*UserPlatformQuota, error)
+	predicates                  []predicate.UserPlatformQuota
 }
 
 var _ ent.Mutation = (*UserPlatformQuotaMutation)(nil)
@@ -54436,6 +54438,91 @@ func (m *UserPlatformQuotaMutation) ResetMonthlyWindowStart() {
 	delete(m.clearedFields, userplatformquota.FieldMonthlyWindowStart)
 }
 
+// SetDailyFollowResetBoundary sets the "daily_follow_reset_boundary" field.
+func (m *UserPlatformQuotaMutation) SetDailyFollowResetBoundary(t time.Time) {
+	m.daily_follow_reset_boundary = &t
+}
+
+// DailyFollowResetBoundary returns the value of the "daily_follow_reset_boundary" field in the mutation.
+func (m *UserPlatformQuotaMutation) DailyFollowResetBoundary() (r time.Time, exists bool) {
+	v := m.daily_follow_reset_boundary
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDailyFollowResetBoundary returns the old "daily_follow_reset_boundary" field's value of the UserPlatformQuota entity.
+// If the UserPlatformQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserPlatformQuotaMutation) OldDailyFollowResetBoundary(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDailyFollowResetBoundary is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDailyFollowResetBoundary requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDailyFollowResetBoundary: %w", err)
+	}
+	return oldValue.DailyFollowResetBoundary, nil
+}
+
+// ClearDailyFollowResetBoundary clears the value of the "daily_follow_reset_boundary" field.
+func (m *UserPlatformQuotaMutation) ClearDailyFollowResetBoundary() {
+	m.daily_follow_reset_boundary = nil
+	m.clearedFields[userplatformquota.FieldDailyFollowResetBoundary] = struct{}{}
+}
+
+// DailyFollowResetBoundaryCleared returns if the "daily_follow_reset_boundary" field was cleared in this mutation.
+func (m *UserPlatformQuotaMutation) DailyFollowResetBoundaryCleared() bool {
+	_, ok := m.clearedFields[userplatformquota.FieldDailyFollowResetBoundary]
+	return ok
+}
+
+// ResetDailyFollowResetBoundary resets all changes to the "daily_follow_reset_boundary" field.
+func (m *UserPlatformQuotaMutation) ResetDailyFollowResetBoundary() {
+	m.daily_follow_reset_boundary = nil
+	delete(m.clearedFields, userplatformquota.FieldDailyFollowResetBoundary)
+}
+
+// SetWeeklyFollowEnabled sets the "weekly_follow_enabled" field.
+func (m *UserPlatformQuotaMutation) SetWeeklyFollowEnabled(b bool) {
+	m.weekly_follow_enabled = &b
+}
+
+// WeeklyFollowEnabled returns the value of the "weekly_follow_enabled" field in the mutation.
+func (m *UserPlatformQuotaMutation) WeeklyFollowEnabled() (r bool, exists bool) {
+	v := m.weekly_follow_enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWeeklyFollowEnabled returns the old "weekly_follow_enabled" field's value of the UserPlatformQuota entity.
+// If the UserPlatformQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserPlatformQuotaMutation) OldWeeklyFollowEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWeeklyFollowEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWeeklyFollowEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWeeklyFollowEnabled: %w", err)
+	}
+	return oldValue.WeeklyFollowEnabled, nil
+}
+
+// ResetWeeklyFollowEnabled resets all changes to the "weekly_follow_enabled" field.
+func (m *UserPlatformQuotaMutation) ResetWeeklyFollowEnabled() {
+	m.weekly_follow_enabled = nil
+}
+
 // ClearUser clears the "user" edge to the User entity.
 func (m *UserPlatformQuotaMutation) ClearUser() {
 	m.cleareduser = true
@@ -54497,7 +54584,7 @@ func (m *UserPlatformQuotaMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserPlatformQuotaMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 16)
 	if m.created_at != nil {
 		fields = append(fields, userplatformquota.FieldCreatedAt)
 	}
@@ -54540,6 +54627,12 @@ func (m *UserPlatformQuotaMutation) Fields() []string {
 	if m.monthly_window_start != nil {
 		fields = append(fields, userplatformquota.FieldMonthlyWindowStart)
 	}
+	if m.daily_follow_reset_boundary != nil {
+		fields = append(fields, userplatformquota.FieldDailyFollowResetBoundary)
+	}
+	if m.weekly_follow_enabled != nil {
+		fields = append(fields, userplatformquota.FieldWeeklyFollowEnabled)
+	}
 	return fields
 }
 
@@ -54576,6 +54669,10 @@ func (m *UserPlatformQuotaMutation) Field(name string) (ent.Value, bool) {
 		return m.WeeklyWindowStart()
 	case userplatformquota.FieldMonthlyWindowStart:
 		return m.MonthlyWindowStart()
+	case userplatformquota.FieldDailyFollowResetBoundary:
+		return m.DailyFollowResetBoundary()
+	case userplatformquota.FieldWeeklyFollowEnabled:
+		return m.WeeklyFollowEnabled()
 	}
 	return nil, false
 }
@@ -54613,6 +54710,10 @@ func (m *UserPlatformQuotaMutation) OldField(ctx context.Context, name string) (
 		return m.OldWeeklyWindowStart(ctx)
 	case userplatformquota.FieldMonthlyWindowStart:
 		return m.OldMonthlyWindowStart(ctx)
+	case userplatformquota.FieldDailyFollowResetBoundary:
+		return m.OldDailyFollowResetBoundary(ctx)
+	case userplatformquota.FieldWeeklyFollowEnabled:
+		return m.OldWeeklyFollowEnabled(ctx)
 	}
 	return nil, fmt.Errorf("unknown UserPlatformQuota field %s", name)
 }
@@ -54719,6 +54820,20 @@ func (m *UserPlatformQuotaMutation) SetField(name string, value ent.Value) error
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetMonthlyWindowStart(v)
+		return nil
+	case userplatformquota.FieldDailyFollowResetBoundary:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDailyFollowResetBoundary(v)
+		return nil
+	case userplatformquota.FieldWeeklyFollowEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWeeklyFollowEnabled(v)
 		return nil
 	}
 	return fmt.Errorf("unknown UserPlatformQuota field %s", name)
@@ -54846,6 +54961,9 @@ func (m *UserPlatformQuotaMutation) ClearedFields() []string {
 	if m.FieldCleared(userplatformquota.FieldMonthlyWindowStart) {
 		fields = append(fields, userplatformquota.FieldMonthlyWindowStart)
 	}
+	if m.FieldCleared(userplatformquota.FieldDailyFollowResetBoundary) {
+		fields = append(fields, userplatformquota.FieldDailyFollowResetBoundary)
+	}
 	return fields
 }
 
@@ -54880,6 +54998,9 @@ func (m *UserPlatformQuotaMutation) ClearField(name string) error {
 		return nil
 	case userplatformquota.FieldMonthlyWindowStart:
 		m.ClearMonthlyWindowStart()
+		return nil
+	case userplatformquota.FieldDailyFollowResetBoundary:
+		m.ClearDailyFollowResetBoundary()
 		return nil
 	}
 	return fmt.Errorf("unknown UserPlatformQuota nullable field %s", name)
@@ -54930,6 +55051,12 @@ func (m *UserPlatformQuotaMutation) ResetField(name string) error {
 		return nil
 	case userplatformquota.FieldMonthlyWindowStart:
 		m.ResetMonthlyWindowStart()
+		return nil
+	case userplatformquota.FieldDailyFollowResetBoundary:
+		m.ResetDailyFollowResetBoundary()
+		return nil
+	case userplatformquota.FieldWeeklyFollowEnabled:
+		m.ResetWeeklyFollowEnabled()
 		return nil
 	}
 	return fmt.Errorf("unknown UserPlatformQuota field %s", name)

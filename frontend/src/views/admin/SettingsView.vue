@@ -6990,6 +6990,73 @@
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.settings.features.userQuotaFollowReset.title') }}
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {{ t('admin.settings.features.userQuotaFollowReset.description') }}
+            </p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex flex-wrap items-center justify-between gap-4">
+              <div class="min-w-0 flex-1">
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.features.userQuotaFollowReset.enabled') }}
+                </label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.userQuotaFollowReset.enabledHint') }}
+                </p>
+              </div>
+              <div class="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  class="rounded-lg border px-3 py-2 text-sm font-medium transition"
+                  :class="form.user_quota_follow_account_reset_weekly_enabled
+                    ? 'border-primary-500 bg-primary-50 text-primary-700 dark:bg-primary-900/20 dark:text-primary-300'
+                    : 'border-gray-200 text-gray-500 hover:border-gray-300 dark:border-dark-600 dark:text-dark-300'"
+                  :aria-pressed="form.user_quota_follow_account_reset_weekly_enabled"
+                  @click="form.user_quota_follow_account_reset_weekly_enabled = !form.user_quota_follow_account_reset_weekly_enabled"
+                >
+                  {{ t('admin.settings.features.userQuotaFollowReset.resetWeekly') }}
+                </button>
+                <button
+                  type="button"
+                  class="rounded-lg border px-3 py-2 text-sm font-medium transition"
+                  :class="form.user_quota_follow_account_reset_daily_enabled
+                    ? 'border-primary-500 bg-primary-50 text-primary-700 dark:bg-primary-900/20 dark:text-primary-300'
+                    : 'border-gray-200 text-gray-500 hover:border-gray-300 dark:border-dark-600 dark:text-dark-300'"
+                  :aria-pressed="form.user_quota_follow_account_reset_daily_enabled"
+                  @click="form.user_quota_follow_account_reset_daily_enabled = !form.user_quota_follow_account_reset_daily_enabled"
+                >
+                  {{ t('admin.settings.features.userQuotaFollowReset.resetDaily') }}
+                </button>
+                <Toggle v-model="form.user_quota_follow_account_reset_enabled" />
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 dark:text-gray-500">
+              {{ t('admin.settings.features.userQuotaFollowReset.scopeHint') }}
+            </p>
+
+            <div v-if="form.user_quota_follow_account_reset_enabled" class="space-y-2">
+              <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label class="input-label">{{ t('admin.settings.features.userQuotaFollowReset.minInterval') }}</label>
+                  <input v-model.number="form.user_quota_follow_account_reset_min_interval_minutes" type="number" min="1" step="1" class="input" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.settings.features.userQuotaFollowReset.maxInterval') }}</label>
+                  <input v-model.number="form.user_quota_follow_account_reset_max_interval_minutes" type="number" min="1" step="1" class="input" />
+                </div>
+              </div>
+              <p class="text-xs text-gray-400 dark:text-gray-500">
+                {{ t('admin.settings.features.userQuotaFollowReset.intervalHint') }}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
               {{ t('admin.settings.features.channelMonitor.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -9746,6 +9813,11 @@ const form = reactive<SettingsForm>({
   channel_monitor_default_interval_seconds: 60,
   channel_monitor_hide_throughput: false,
   channel_monitor_show_quota: false,
+  user_quota_follow_account_reset_enabled: false,
+  user_quota_follow_account_reset_weekly_enabled: true,
+  user_quota_follow_account_reset_daily_enabled: false,
+  user_quota_follow_account_reset_min_interval_minutes: 10,
+  user_quota_follow_account_reset_max_interval_minutes: 15,
   // Available Channels feature switch
   available_channels_enabled: false,
   // Model Plaza feature switches + description
@@ -10750,6 +10822,18 @@ async function loadSettings() {
     form.channel_monitor_show_quota = Boolean(
       settings.channel_monitor_show_quota
     );
+    form.user_quota_follow_account_reset_enabled = Boolean(
+      settings.user_quota_follow_account_reset_enabled
+    );
+    form.user_quota_follow_account_reset_weekly_enabled =
+      settings.user_quota_follow_account_reset_weekly_enabled !== false;
+    form.user_quota_follow_account_reset_daily_enabled = Boolean(
+      settings.user_quota_follow_account_reset_daily_enabled
+    );
+    form.user_quota_follow_account_reset_min_interval_minutes =
+      Number(settings.user_quota_follow_account_reset_min_interval_minutes) || 10;
+    form.user_quota_follow_account_reset_max_interval_minutes =
+      Number(settings.user_quota_follow_account_reset_max_interval_minutes) || 15;
     form.login_agreement_updated_at =
       settings.login_agreement_updated_at || "2026-03-31";
     form.login_agreement_documents =
@@ -10953,6 +11037,13 @@ function findDuplicateDefaultSubscription(
 async function saveSettings() {
   saving.value = true;
   try {
+    const quotaFollowMinInterval = Number(form.user_quota_follow_account_reset_min_interval_minutes);
+    const quotaFollowMaxInterval = Number(form.user_quota_follow_account_reset_max_interval_minutes);
+    if (!Number.isInteger(quotaFollowMinInterval) || quotaFollowMinInterval <= 0 ||
+        !Number.isInteger(quotaFollowMaxInterval) || quotaFollowMaxInterval < quotaFollowMinInterval) {
+      appStore.showError(t('admin.settings.features.userQuotaFollowReset.intervalError'));
+      return;
+    }
     const normalizedTableDefaultPageSize = Math.floor(
       Number(form.table_default_page_size),
     );
@@ -11402,6 +11493,11 @@ async function saveSettings() {
         Number(form.channel_monitor_default_interval_seconds) || 60,
       channel_monitor_hide_throughput: Boolean(form.channel_monitor_hide_throughput),
       channel_monitor_show_quota: Boolean(form.channel_monitor_show_quota),
+      user_quota_follow_account_reset_enabled: Boolean(form.user_quota_follow_account_reset_enabled),
+      user_quota_follow_account_reset_weekly_enabled: Boolean(form.user_quota_follow_account_reset_weekly_enabled),
+      user_quota_follow_account_reset_daily_enabled: Boolean(form.user_quota_follow_account_reset_daily_enabled),
+      user_quota_follow_account_reset_min_interval_minutes: quotaFollowMinInterval,
+      user_quota_follow_account_reset_max_interval_minutes: quotaFollowMaxInterval,
       // Available Channels feature switch
       available_channels_enabled: form.available_channels_enabled,
       // Model Plaza feature switches + description

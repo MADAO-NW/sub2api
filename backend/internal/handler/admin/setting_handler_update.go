@@ -328,11 +328,16 @@ type UpdateSettingsRequest struct {
 	PaymentAlipayMobilePrecreateDeepLink *bool `json:"payment_alipay_mobile_precreate_deep_link"`
 
 	// Channel Monitor feature switch
-	ChannelMonitorEnabled                *bool   `json:"channel_monitor_enabled"`
-	ChannelMonitorMode                   *string `json:"channel_monitor_mode"`
-	ChannelMonitorDefaultIntervalSeconds *int    `json:"channel_monitor_default_interval_seconds"`
-	ChannelMonitorHideThroughput         *bool   `json:"channel_monitor_hide_throughput"`
-	ChannelMonitorShowQuota              *bool   `json:"channel_monitor_show_quota"`
+	ChannelMonitorEnabled                         *bool   `json:"channel_monitor_enabled"`
+	ChannelMonitorMode                            *string `json:"channel_monitor_mode"`
+	ChannelMonitorDefaultIntervalSeconds          *int    `json:"channel_monitor_default_interval_seconds"`
+	ChannelMonitorHideThroughput                  *bool   `json:"channel_monitor_hide_throughput"`
+	ChannelMonitorShowQuota                       *bool   `json:"channel_monitor_show_quota"`
+	UserQuotaFollowAccountResetEnabled            *bool   `json:"user_quota_follow_account_reset_enabled"`
+	UserQuotaFollowAccountResetWeeklyEnabled      *bool   `json:"user_quota_follow_account_reset_weekly_enabled"`
+	UserQuotaFollowAccountResetDailyEnabled       *bool   `json:"user_quota_follow_account_reset_daily_enabled"`
+	UserQuotaFollowAccountResetMinIntervalMinutes *int    `json:"user_quota_follow_account_reset_min_interval_minutes"`
+	UserQuotaFollowAccountResetMaxIntervalMinutes *int    `json:"user_quota_follow_account_reset_max_interval_minutes"`
 
 	// Grok model mapping policy
 	GrokDefaultTextModel           *string `json:"grok_default_text_model"`
@@ -1489,6 +1494,20 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		response.BadRequest(c, "cyber_session_block_ttl_seconds must be > 0")
 		return
 	}
+	if req.UserQuotaFollowAccountResetMinIntervalMinutes != nil && *req.UserQuotaFollowAccountResetMinIntervalMinutes <= 0 {
+		response.BadRequest(c, "user_quota_follow_account_reset_min_interval_minutes must be > 0")
+		return
+	}
+	if req.UserQuotaFollowAccountResetMaxIntervalMinutes != nil && *req.UserQuotaFollowAccountResetMaxIntervalMinutes <= 0 {
+		response.BadRequest(c, "user_quota_follow_account_reset_max_interval_minutes must be > 0")
+		return
+	}
+	quotaFollowMinInterval := intValueOrDefault(req.UserQuotaFollowAccountResetMinIntervalMinutes, previousSettings.UserQuotaFollowAccountResetMinIntervalMinutes)
+	quotaFollowMaxInterval := intValueOrDefault(req.UserQuotaFollowAccountResetMaxIntervalMinutes, previousSettings.UserQuotaFollowAccountResetMaxIntervalMinutes)
+	if quotaFollowMaxInterval < quotaFollowMinInterval {
+		response.BadRequest(c, "user_quota_follow_account_reset_max_interval_minutes must be greater than or equal to min interval")
+		return
+	}
 
 	settings := &service.SystemSettings{
 		// 系统全局 platform quota 默认值（整体替换语义）
@@ -1896,6 +1915,26 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.ChannelMonitorShowQuota
 		}(),
+		UserQuotaFollowAccountResetEnabled: func() bool {
+			if req.UserQuotaFollowAccountResetEnabled != nil {
+				return *req.UserQuotaFollowAccountResetEnabled
+			}
+			return previousSettings.UserQuotaFollowAccountResetEnabled
+		}(),
+		UserQuotaFollowAccountResetWeeklyEnabled: func() bool {
+			if req.UserQuotaFollowAccountResetWeeklyEnabled != nil {
+				return *req.UserQuotaFollowAccountResetWeeklyEnabled
+			}
+			return previousSettings.UserQuotaFollowAccountResetWeeklyEnabled
+		}(),
+		UserQuotaFollowAccountResetDailyEnabled: func() bool {
+			if req.UserQuotaFollowAccountResetDailyEnabled != nil {
+				return *req.UserQuotaFollowAccountResetDailyEnabled
+			}
+			return previousSettings.UserQuotaFollowAccountResetDailyEnabled
+		}(),
+		UserQuotaFollowAccountResetMinIntervalMinutes: quotaFollowMinInterval,
+		UserQuotaFollowAccountResetMaxIntervalMinutes: quotaFollowMaxInterval,
 		GrokDefaultTextModel: func() string {
 			if req.GrokDefaultTextModel != nil {
 				return *req.GrokDefaultTextModel
@@ -2345,11 +2384,16 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		PaymentAlipayForceQRCode:                               updatedPaymentCfg.AlipayForceQRCode,
 		PaymentAlipayMobilePrecreateDeepLink:                   updatedPaymentCfg.AlipayMobilePrecreateDeepLink,
 
-		ChannelMonitorEnabled:                updatedSettings.ChannelMonitorEnabled,
-		ChannelMonitorMode:                   updatedSettings.ChannelMonitorMode,
-		ChannelMonitorDefaultIntervalSeconds: updatedSettings.ChannelMonitorDefaultIntervalSeconds,
-		ChannelMonitorHideThroughput:         updatedSettings.ChannelMonitorHideThroughput,
-		ChannelMonitorShowQuota:              updatedSettings.ChannelMonitorShowQuota,
+		ChannelMonitorEnabled:                         updatedSettings.ChannelMonitorEnabled,
+		ChannelMonitorMode:                            updatedSettings.ChannelMonitorMode,
+		ChannelMonitorDefaultIntervalSeconds:          updatedSettings.ChannelMonitorDefaultIntervalSeconds,
+		ChannelMonitorHideThroughput:                  updatedSettings.ChannelMonitorHideThroughput,
+		ChannelMonitorShowQuota:                       updatedSettings.ChannelMonitorShowQuota,
+		UserQuotaFollowAccountResetEnabled:            updatedSettings.UserQuotaFollowAccountResetEnabled,
+		UserQuotaFollowAccountResetWeeklyEnabled:      updatedSettings.UserQuotaFollowAccountResetWeeklyEnabled,
+		UserQuotaFollowAccountResetDailyEnabled:       updatedSettings.UserQuotaFollowAccountResetDailyEnabled,
+		UserQuotaFollowAccountResetMinIntervalMinutes: updatedSettings.UserQuotaFollowAccountResetMinIntervalMinutes,
+		UserQuotaFollowAccountResetMaxIntervalMinutes: updatedSettings.UserQuotaFollowAccountResetMaxIntervalMinutes,
 
 		GrokDefaultTextModel:           updatedSettings.GrokDefaultTextModel,
 		GrokCrossClientModelMapEnabled: updatedSettings.GrokCrossClientModelMapEnabled,

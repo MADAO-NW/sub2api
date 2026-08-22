@@ -43,6 +43,9 @@ func (s *SettingService) UpdateSettingsOmitting(ctx context.Context, settings *S
 		return err
 	}
 	omitted.dropFrom(updates)
+	if err := s.prepareUserQuotaFollowResetActivation(ctx, settings, updates); err != nil {
+		return err
+	}
 
 	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
 		return err
@@ -73,6 +76,9 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx contex
 		updates[key] = value
 	}
 	omitted.dropFrom(updates)
+	if err := s.prepareUserQuotaFollowResetActivation(ctx, settings, updates); err != nil {
+		return err
+	}
 
 	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
 		return err
@@ -418,6 +424,11 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	}
 	updates[SettingKeyChannelMonitorHideThroughput] = strconv.FormatBool(settings.ChannelMonitorHideThroughput)
 	updates[SettingKeyChannelMonitorShowQuota] = strconv.FormatBool(settings.ChannelMonitorShowQuota)
+	updates[SettingKeyUserQuotaFollowAccountResetEnabled] = strconv.FormatBool(settings.UserQuotaFollowAccountResetEnabled)
+	updates[SettingKeyUserQuotaFollowAccountResetWeeklyEnabled] = strconv.FormatBool(settings.UserQuotaFollowAccountResetWeeklyEnabled)
+	updates[SettingKeyUserQuotaFollowAccountResetDailyEnabled] = strconv.FormatBool(settings.UserQuotaFollowAccountResetDailyEnabled)
+	updates[SettingKeyUserQuotaFollowAccountResetMinIntervalMinutes] = strconv.Itoa(settings.UserQuotaFollowAccountResetMinIntervalMinutes)
+	updates[SettingKeyUserQuotaFollowAccountResetMaxIntervalMinutes] = strconv.Itoa(settings.UserQuotaFollowAccountResetMaxIntervalMinutes)
 
 	// Grok model mapping policy
 	if v := strings.TrimSpace(settings.GrokDefaultTextModel); v != "" {
@@ -681,6 +692,7 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	if settings == nil {
 		return
 	}
+	s.userQuotaFollowResetRuntimeCache.Store(userQuotaFollowResetRuntimeFromSystemSettings(settings))
 
 	// 先使 inflight singleflight 失效，再刷新缓存，缩小旧值覆盖新值的竞态窗口
 	versionBoundsSF.Forget("version_bounds")

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 )
 
@@ -55,6 +56,19 @@ func TestIncrementUserPlatformQuotaUsage_SyncCallsCache(t *testing.T) {
 	}
 	if fake.calls[1] != (incrCall{userID: 101, platform: "openai", cost: 0.50, ttl: 120 * time.Second, markDirty: false}) {
 		t.Errorf("call[1] = %+v", fake.calls[1])
+	}
+}
+
+func TestUserQuotaDailyExhaustedErrorUsesEarlierAccountReset(t *testing.T) {
+	now := timezone.StartOfDay(time.Now()).Add(12 * time.Hour)
+	accountResetAt := now.Add(time.Hour)
+	err := userQuotaDailyExhaustedError(true, &accountResetAt, now)
+	var appErr *infraerrors.ApplicationError
+	if !errors.As(err, &appErr) {
+		t.Fatalf("expected application error, got %T", err)
+	}
+	if got := appErr.Metadata["window_resets_at"]; got != accountResetAt.Format(time.RFC3339) {
+		t.Fatalf("window_resets_at = %q, want %q", got, accountResetAt.Format(time.RFC3339))
 	}
 }
 
@@ -259,6 +273,24 @@ func TestCheckUserPlatformQuotaEligibility_DailyExhausted(t *testing.T) {
 	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic")
 	if !errors.Is(err, ErrUserPlatformDailyQuotaExhausted) {
 		t.Errorf("expected ErrUserPlatformDailyQuotaExhausted, got %v", err)
+	}
+}
+
+func TestCheckUserPlatformQuotaEligibility_WeeklyFollowDoesNotResetOnMonday(t *testing.T) {
+	weekly := 5.0
+	oldWeekStart := timezone.StartOfWeek(time.Now()).Add(-7 * 24 * time.Hour)
+	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{UserID: 1, Platform: "openai", WeeklyLimitUSD: &weekly}}
+	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{
+		WeeklyUsageUSD:      weekly,
+		WeeklyLimitUSD:      &weekly,
+		WeeklyWindowStart:   &oldWeekStart,
+		WeeklyFollowEnabled: true,
+		SchemaVersion:       UserPlatformQuotaCacheSchemaV1,
+	}}
+	s := newServiceForPreflight(t, repo, cache)
+	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "openai")
+	if !errors.Is(err, ErrUserPlatformWeeklyQuotaExhausted) {
+		t.Fatalf("weekly follow must preserve usage past Monday, got %v", err)
 	}
 }
 
@@ -769,9 +801,9 @@ func TestHasUserPlatformQuotaLimit(t *testing.T) {
 	daily := 5.0
 
 	tests := []struct {
-		name    string
-		setup   func() *BillingCacheService
-		want    bool
+		name  string
+		setup func() *BillingCacheService
+		want  bool
 	}{
 		{
 			name: "has_limit",

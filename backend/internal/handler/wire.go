@@ -47,10 +47,12 @@ func ProvideAdminHandlers(
 	complianceHandler *admin.ComplianceHandler,
 	auditLogHandler *admin.AuditLogHandler,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
+	userQuotaFollowReset *service.UserQuotaFollowResetService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
+	userHandler.SetUserQuotaFollowResetApplier(userQuotaFollowReset)
 	return &AdminHandlers{
 		Dashboard:              dashboardHandler,
 		User:                   userHandler,
@@ -192,7 +194,9 @@ func ProvideHandlers(
 	batchImageHandler *BatchImageHandler,
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
+	userQuotaFollowReset *service.UserQuotaFollowResetService,
 ) *Handlers {
+	userHandler.SetUserQuotaFollowResetApplier(userQuotaFollowReset)
 	return &Handlers{
 		Auth:             authHandler,
 		User:             userHandler,

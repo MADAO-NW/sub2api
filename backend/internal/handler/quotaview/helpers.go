@@ -13,7 +13,14 @@ import (
 // includeWindowStart=true 时输出 *_window_start 字段（admin 视角调试用）
 func LazyZeroQuotaForResponse(r service.UserPlatformQuotaRecord, now time.Time, includeWindowStart bool) map[string]any {
 	daily := buildWindowSlice(r.DailyUsageUSD, r.DailyLimitUSD, r.DailyWindowStart, NeedsDailyReset(r.DailyWindowStart, now), nextDailyResetTime(now), includeWindowStart)
-	weekly := buildWindowSlice(r.WeeklyUsageUSD, r.WeeklyLimitUSD, r.WeeklyWindowStart, NeedsWeeklyReset(r.WeeklyWindowStart, now), nextWeeklyResetTime(now), includeWindowStart)
+	weeklyNeedsReset := NeedsWeeklyReset(r.WeeklyWindowStart, now)
+	if r.WeeklyFollowEnabled {
+		weeklyNeedsReset = false
+	}
+	weekly := buildWindowSlice(r.WeeklyUsageUSD, r.WeeklyLimitUSD, r.WeeklyWindowStart, weeklyNeedsReset, nextWeeklyResetTime(now), includeWindowStart)
+	if r.WeeklyFollowEnabled {
+		weekly.resetsAt = nil
+	}
 	monthly := buildWindowSlice(r.MonthlyUsageUSD, r.MonthlyLimitUSD, r.MonthlyWindowStart, NeedsMonthlyReset(r.MonthlyWindowStart, now), NextMonthlyResetTimeFrom(r.MonthlyWindowStart, now), includeWindowStart)
 	out := map[string]any{
 		"platform":                 r.Platform,

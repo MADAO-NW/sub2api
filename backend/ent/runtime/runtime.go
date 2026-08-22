@@ -2415,6 +2415,10 @@ func init() {
 	userplatformquotaDescMonthlyUsageUsd := userplatformquotaFields[7].Descriptor()
 	// userplatformquota.DefaultMonthlyUsageUsd holds the default value on creation for the monthly_usage_usd field.
 	userplatformquota.DefaultMonthlyUsageUsd = userplatformquotaDescMonthlyUsageUsd.Default.(float64)
+	// userplatformquotaDescWeeklyFollowEnabled is the schema descriptor for weekly_follow_enabled field.
+	userplatformquotaDescWeeklyFollowEnabled := userplatformquotaFields[12].Descriptor()
+	// userplatformquota.DefaultWeeklyFollowEnabled holds the default value on creation for the weekly_follow_enabled field.
+	userplatformquota.DefaultWeeklyFollowEnabled = userplatformquotaDescWeeklyFollowEnabled.Default.(bool)
 	usersubscriptionMixin := schema.UserSubscription{}.Mixin()
 	usersubscriptionMixinHooks1 := usersubscriptionMixin[1].Hooks()
 	usersubscription.Hooks[0] = usersubscriptionMixinHooks1[0]

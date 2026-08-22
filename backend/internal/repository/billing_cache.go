@@ -423,17 +423,19 @@ func parseUserPlatformQuotaHash(m map[string]string) *service.UserPlatformQuotaC
 		return n
 	}
 	return &service.UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:      parseFloat(m["daily_usage"]),
-		WeeklyUsageUSD:     parseFloat(m["weekly_usage"]),
-		MonthlyUsageUSD:    parseFloat(m["monthly_usage"]),
-		Version:            parseInt64(m["version"]),
-		SchemaVersion:      parseInt64(m["schema_version"]),
-		DailyLimitUSD:      parseFloatPtr(m["daily_limit"]),
-		WeeklyLimitUSD:     parseFloatPtr(m["weekly_limit"]),
-		MonthlyLimitUSD:    parseFloatPtr(m["monthly_limit"]),
-		DailyWindowStart:   parseTimePtr(m["daily_window_start"]),
-		WeeklyWindowStart:  parseTimePtr(m["weekly_window_start"]),
-		MonthlyWindowStart: parseTimePtr(m["monthly_window_start"]),
+		DailyUsageUSD:            parseFloat(m["daily_usage"]),
+		WeeklyUsageUSD:           parseFloat(m["weekly_usage"]),
+		MonthlyUsageUSD:          parseFloat(m["monthly_usage"]),
+		Version:                  parseInt64(m["version"]),
+		SchemaVersion:            parseInt64(m["schema_version"]),
+		DailyLimitUSD:            parseFloatPtr(m["daily_limit"]),
+		WeeklyLimitUSD:           parseFloatPtr(m["weekly_limit"]),
+		MonthlyLimitUSD:          parseFloatPtr(m["monthly_limit"]),
+		DailyWindowStart:         parseTimePtr(m["daily_window_start"]),
+		WeeklyWindowStart:        parseTimePtr(m["weekly_window_start"]),
+		MonthlyWindowStart:       parseTimePtr(m["monthly_window_start"]),
+		DailyFollowResetBoundary: parseTimePtr(m["daily_follow_reset_boundary"]),
+		WeeklyFollowEnabled:      m["weekly_follow_enabled"] == "true",
 	}
 }
 
@@ -485,6 +487,8 @@ func (c *billingCache) SetUserPlatformQuotaCache(ctx context.Context, userID int
 		"daily_window_start", fmtTimePtr(entry.DailyWindowStart),
 		"weekly_window_start", fmtTimePtr(entry.WeeklyWindowStart),
 		"monthly_window_start", fmtTimePtr(entry.MonthlyWindowStart),
+		"daily_follow_reset_boundary", fmtTimePtr(entry.DailyFollowResetBoundary),
+		"weekly_follow_enabled", strconv.FormatBool(entry.WeeklyFollowEnabled),
 	)
 	pipe.Expire(ctx, key, ttl)
 	_, err := pipe.Exec(ctx)
@@ -493,6 +497,70 @@ func (c *billingCache) SetUserPlatformQuotaCache(ctx context.Context, userID int
 
 func (c *billingCache) DeleteUserPlatformQuotaCache(ctx context.Context, userID int64, platform string) error {
 	return c.rdb.Del(ctx, userPlatformQuotaCacheKey(userID, platform)).Err()
+}
+
+// applyUserPlatformQuotaFollowResetScript 在不删除 key 的前提下原子推进跟随策略与重置边界。
+const applyUserPlatformQuotaFollowResetScript = `
+if redis.call("EXISTS", KEYS[1]) == 0 then
+    return 0
+end
+local ver = redis.call("HGET", KEYS[1], "schema_version")
+if ver == false or tonumber(ver) ~= tonumber(ARGV[1]) then
+    return 0
+end
+redis.call("HSET", KEYS[1], "weekly_follow_enabled", ARGV[2])
+local changed = 0
+if ARGV[3] == "1" and ARGV[5] ~= "" then
+    local previous = redis.call("HGET", KEYS[1], "daily_follow_reset_boundary")
+    if previous == false or previous == "" or tonumber(ARGV[5]) > tonumber(previous) then
+        redis.call("HSET", KEYS[1], "daily_follow_reset_boundary", ARGV[5])
+        if ARGV[4] == "1" then
+            redis.call("HSET", KEYS[1], "daily_usage", 0)
+        end
+        changed = 1
+    end
+end
+if ARGV[6] == "1" and ARGV[5] ~= "" then
+    local previous = redis.call("HGET", KEYS[1], "weekly_window_start")
+    if previous == false or previous == "" or tonumber(ARGV[5]) > tonumber(previous) then
+        redis.call("HSET", KEYS[1], "weekly_usage", 0, "weekly_window_start", ARGV[5])
+        changed = 1
+    end
+end
+if changed == 1 then
+    redis.call("HINCRBY", KEYS[1], "version", 1)
+    redis.call("SADD", KEYS[2], ARGV[7])
+    redis.call("EXPIRE", KEYS[2], ARGV[8])
+end
+return changed
+`
+
+func (c *billingCache) ApplyUserPlatformQuotaFollowReset(ctx context.Context, userID int64, platform string, result service.UserQuotaFollowResetApplyResult) error {
+	boundary := ""
+	if result.Boundary != nil {
+		boundary = strconv.FormatInt(result.Boundary.Unix(), 10)
+	}
+	boolArg := func(value bool) string {
+		if value {
+			return "1"
+		}
+		return "0"
+	}
+	_, err := c.rdb.Eval(ctx, applyUserPlatformQuotaFollowResetScript,
+		[]string{userPlatformQuotaCacheKey(userID, platform), userPlatformQuotaDirtySetKey()},
+		service.UserPlatformQuotaCacheSchemaV1,
+		strconv.FormatBool(result.WeeklyFollowEnabled),
+		boolArg(result.DailyBoundaryAdvanced),
+		boolArg(result.DailyReset),
+		boundary,
+		boolArg(result.WeeklyReset),
+		userPlatformQuotaDirtyMember(userID, platform),
+		userPlatformQuotaDirtyTTLSeconds,
+	).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil
+	}
+	return err
 }
 
 // updateUserPlatformQuotaUsageScript 缓存累加：EXISTS + schema_version 双重守卫。

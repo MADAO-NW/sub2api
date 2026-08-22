@@ -80,6 +80,24 @@ func TestLazyZeroQuotaForResponse_MonthlyResetsAt_NotDrifting(t *testing.T) {
 	}
 }
 
+func TestLazyZeroQuotaForResponse_WeeklyFollowPreservesUsageAndHidesMonday(t *testing.T) {
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	oldStart := timezone.StartOfWeek(now).Add(-7 * 24 * time.Hour)
+	record := service.UserPlatformQuotaRecord{
+		Platform:            "openai",
+		WeeklyUsageUSD:      3.5,
+		WeeklyWindowStart:   &oldStart,
+		WeeklyFollowEnabled: true,
+	}
+	out := LazyZeroQuotaForResponse(record, now, false)
+	if got := out["weekly_usage_usd"]; got != 3.5 {
+		t.Fatalf("weekly follow usage = %v, want 3.5", got)
+	}
+	if got, ok := out["weekly_window_resets_at"].(*string); !ok || got != nil {
+		t.Fatalf("weekly follow reset time = %#v, want typed nil", out["weekly_window_resets_at"])
+	}
+}
+
 // TestNeedsDailyReset_FollowsServerTimezone 验证日窗口过期判断按全局时区（北京 0 点）而非 UTC。
 func TestNeedsDailyReset_FollowsServerTimezone(t *testing.T) {
 	if err := timezone.Init("Asia/Shanghai"); err != nil {

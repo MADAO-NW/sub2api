@@ -212,10 +212,22 @@ const (
 	SettingKeyContentModerationConfig             = "content_moderation_config"        // 内容审计配置（JSON）
 	SettingKeyCyberSessionBlockEnabled            = "cyber_session_block_enabled"      // cyber 命中后会话级自动屏蔽总开关(默认关)
 	SettingKeyCyberSessionBlockTTLSeconds         = "cyber_session_block_ttl_seconds"  // 会话屏蔽 TTL 秒数(默认 3600)
-	SettingKeyLoginAgreementEnabled               = "login_agreement_enabled"          // 登录前是否要求同意条款
-	SettingKeyLoginAgreementMode                  = "login_agreement_mode"             // 条款确认展示模式：modal / checkbox
-	SettingKeyLoginAgreementUpdatedAt             = "login_agreement_updated_at"       // 条款更新日期（展示用）
-	SettingKeyLoginAgreementDocuments             = "login_agreement_documents"        // 条款文档列表（JSON，Markdown 内容）
+	// SettingKeyUserQuotaFollowAccountResetEnabled 控制用户日/周限额是否跟随上游账号周重置。
+	SettingKeyUserQuotaFollowAccountResetEnabled = "user_quota_follow_account_reset_enabled"
+	// SettingKeyUserQuotaFollowAccountResetWeeklyEnabled 控制跟随事件是否重置用户周限额。
+	SettingKeyUserQuotaFollowAccountResetWeeklyEnabled = "user_quota_follow_account_reset_weekly_enabled"
+	// SettingKeyUserQuotaFollowAccountResetDailyEnabled 控制跟随事件是否额外重置用户日限额。
+	SettingKeyUserQuotaFollowAccountResetDailyEnabled = "user_quota_follow_account_reset_daily_enabled"
+	// SettingKeyUserQuotaFollowAccountResetMinIntervalMinutes 保存随机检测间隔下限（分钟）。
+	SettingKeyUserQuotaFollowAccountResetMinIntervalMinutes = "user_quota_follow_account_reset_min_interval_minutes"
+	// SettingKeyUserQuotaFollowAccountResetMaxIntervalMinutes 保存随机检测间隔上限（分钟）。
+	SettingKeyUserQuotaFollowAccountResetMaxIntervalMinutes = "user_quota_follow_account_reset_max_interval_minutes"
+	// SettingKeyUserQuotaFollowAccountResetActivationAt 标识本轮跟随规则开始生效的时间。
+	SettingKeyUserQuotaFollowAccountResetActivationAt = "user_quota_follow_account_reset_activation_at"
+	SettingKeyLoginAgreementEnabled                   = "login_agreement_enabled"    // 登录前是否要求同意条款
+	SettingKeyLoginAgreementMode                      = "login_agreement_mode"       // 条款确认展示模式：modal / checkbox
+	SettingKeyLoginAgreementUpdatedAt                 = "login_agreement_updated_at" // 条款更新日期（展示用）
+	SettingKeyLoginAgreementDocuments                 = "login_agreement_documents"  // 条款文档列表（JSON，Markdown 内容）
 
 	// 邮件服务设置
 	SettingKeySMTPHost     = "smtp_host"      // SMTP服务器地址

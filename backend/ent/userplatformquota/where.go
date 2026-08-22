@@ -125,6 +125,16 @@ func MonthlyWindowStart(v time.Time) predicate.UserPlatformQuota {
 	return predicate.UserPlatformQuota(sql.FieldEQ(FieldMonthlyWindowStart, v))
 }
 
+// DailyFollowResetBoundary applies equality check predicate on the "daily_follow_reset_boundary" field. It's identical to DailyFollowResetBoundaryEQ.
+func DailyFollowResetBoundary(v time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldEQ(FieldDailyFollowResetBoundary, v))
+}
+
+// WeeklyFollowEnabled applies equality check predicate on the "weekly_follow_enabled" field. It's identical to WeeklyFollowEnabledEQ.
+func WeeklyFollowEnabled(v bool) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldEQ(FieldWeeklyFollowEnabled, v))
+}
+
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.
 func CreatedAtEQ(v time.Time) predicate.UserPlatformQuota {
 	return predicate.UserPlatformQuota(sql.FieldEQ(FieldCreatedAt, v))
@@ -758,6 +768,66 @@ func MonthlyWindowStartIsNil() predicate.UserPlatformQuota {
 // MonthlyWindowStartNotNil applies the NotNil predicate on the "monthly_window_start" field.
 func MonthlyWindowStartNotNil() predicate.UserPlatformQuota {
 	return predicate.UserPlatformQuota(sql.FieldNotNull(FieldMonthlyWindowStart))
+}
+
+// DailyFollowResetBoundaryEQ applies the EQ predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryEQ(v time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldEQ(FieldDailyFollowResetBoundary, v))
+}
+
+// DailyFollowResetBoundaryNEQ applies the NEQ predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryNEQ(v time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldNEQ(FieldDailyFollowResetBoundary, v))
+}
+
+// DailyFollowResetBoundaryIn applies the In predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryIn(vs ...time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldIn(FieldDailyFollowResetBoundary, vs...))
+}
+
+// DailyFollowResetBoundaryNotIn applies the NotIn predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryNotIn(vs ...time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldNotIn(FieldDailyFollowResetBoundary, vs...))
+}
+
+// DailyFollowResetBoundaryGT applies the GT predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryGT(v time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldGT(FieldDailyFollowResetBoundary, v))
+}
+
+// DailyFollowResetBoundaryGTE applies the GTE predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryGTE(v time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldGTE(FieldDailyFollowResetBoundary, v))
+}
+
+// DailyFollowResetBoundaryLT applies the LT predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryLT(v time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldLT(FieldDailyFollowResetBoundary, v))
+}
+
+// DailyFollowResetBoundaryLTE applies the LTE predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryLTE(v time.Time) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldLTE(FieldDailyFollowResetBoundary, v))
+}
+
+// DailyFollowResetBoundaryIsNil applies the IsNil predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryIsNil() predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldIsNull(FieldDailyFollowResetBoundary))
+}
+
+// DailyFollowResetBoundaryNotNil applies the NotNil predicate on the "daily_follow_reset_boundary" field.
+func DailyFollowResetBoundaryNotNil() predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldNotNull(FieldDailyFollowResetBoundary))
+}
+
+// WeeklyFollowEnabledEQ applies the EQ predicate on the "weekly_follow_enabled" field.
+func WeeklyFollowEnabledEQ(v bool) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldEQ(FieldWeeklyFollowEnabled, v))
+}
+
+// WeeklyFollowEnabledNEQ applies the NEQ predicate on the "weekly_follow_enabled" field.
+func WeeklyFollowEnabledNEQ(v bool) predicate.UserPlatformQuota {
+	return predicate.UserPlatformQuota(sql.FieldNEQ(FieldWeeklyFollowEnabled, v))
 }
 
 // HasUser applies the HasEdge predicate on the "user" edge.

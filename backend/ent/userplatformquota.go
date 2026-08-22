@@ -46,6 +46,10 @@ type UserPlatformQuota struct {
 	WeeklyWindowStart *time.Time `json:"weekly_window_start,omitempty"`
 	// MonthlyWindowStart holds the value of the "monthly_window_start" field.
 	MonthlyWindowStart *time.Time `json:"monthly_window_start,omitempty"`
+	// DailyFollowResetBoundary holds the value of the "daily_follow_reset_boundary" field.
+	DailyFollowResetBoundary *time.Time `json:"daily_follow_reset_boundary,omitempty"`
+	// WeeklyFollowEnabled holds the value of the "weekly_follow_enabled" field.
+	WeeklyFollowEnabled bool `json:"weekly_follow_enabled,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserPlatformQuotaQuery when eager-loading is set.
 	Edges        UserPlatformQuotaEdges `json:"edges"`
@@ -77,13 +81,15 @@ func (*UserPlatformQuota) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case userplatformquota.FieldWeeklyFollowEnabled:
+			values[i] = new(sql.NullBool)
 		case userplatformquota.FieldDailyLimitUsd, userplatformquota.FieldWeeklyLimitUsd, userplatformquota.FieldMonthlyLimitUsd, userplatformquota.FieldDailyUsageUsd, userplatformquota.FieldWeeklyUsageUsd, userplatformquota.FieldMonthlyUsageUsd:
 			values[i] = new(sql.NullFloat64)
 		case userplatformquota.FieldID, userplatformquota.FieldUserID:
 			values[i] = new(sql.NullInt64)
 		case userplatformquota.FieldPlatform:
 			values[i] = new(sql.NullString)
-		case userplatformquota.FieldCreatedAt, userplatformquota.FieldUpdatedAt, userplatformquota.FieldDeletedAt, userplatformquota.FieldDailyWindowStart, userplatformquota.FieldWeeklyWindowStart, userplatformquota.FieldMonthlyWindowStart:
+		case userplatformquota.FieldCreatedAt, userplatformquota.FieldUpdatedAt, userplatformquota.FieldDeletedAt, userplatformquota.FieldDailyWindowStart, userplatformquota.FieldWeeklyWindowStart, userplatformquota.FieldMonthlyWindowStart, userplatformquota.FieldDailyFollowResetBoundary:
 			values[i] = new(sql.NullTime)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -197,6 +203,19 @@ func (_m *UserPlatformQuota) assignValues(columns []string, values []any) error 
 				_m.MonthlyWindowStart = new(time.Time)
 				*_m.MonthlyWindowStart = value.Time
 			}
+		case userplatformquota.FieldDailyFollowResetBoundary:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field daily_follow_reset_boundary", values[i])
+			} else if value.Valid {
+				_m.DailyFollowResetBoundary = new(time.Time)
+				*_m.DailyFollowResetBoundary = value.Time
+			}
+		case userplatformquota.FieldWeeklyFollowEnabled:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field weekly_follow_enabled", values[i])
+			} else if value.Valid {
+				_m.WeeklyFollowEnabled = value.Bool
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -293,6 +312,14 @@ func (_m *UserPlatformQuota) String() string {
 		builder.WriteString("monthly_window_start=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	if v := _m.DailyFollowResetBoundary; v != nil {
+		builder.WriteString("daily_follow_reset_boundary=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("weekly_follow_enabled=")
+	builder.WriteString(fmt.Sprintf("%v", _m.WeeklyFollowEnabled))
 	builder.WriteByte(')')
 	return builder.String()
 }

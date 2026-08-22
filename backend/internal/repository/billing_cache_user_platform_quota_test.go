@@ -120,6 +120,51 @@ func TestUserPlatformQuotaCache_IncrHitAccumulates(t *testing.T) {
 	}
 }
 
+func TestUserPlatformQuotaCache_ApplyFollowResetAtomically(t *testing.T) {
+	c, _ := newMiniRedisCache(t)
+	ctx := context.Background()
+	oldBoundary := time.Date(2026, 8, 14, 1, 0, 0, 0, time.UTC)
+	newBoundary := oldBoundary.Add(7 * 24 * time.Hour)
+	if err := c.SetUserPlatformQuotaCache(ctx, 7, "openai", &service.UserPlatformQuotaCacheEntry{
+		DailyUsageUSD:     2,
+		WeeklyUsageUSD:    4,
+		MonthlyUsageUSD:   8,
+		Version:           3,
+		SchemaVersion:     service.UserPlatformQuotaCacheSchemaV1,
+		WeeklyWindowStart: &oldBoundary,
+	}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	result := service.UserQuotaFollowResetApplyResult{
+		WeeklyReset:           true,
+		DailyReset:            true,
+		DailyBoundaryAdvanced: true,
+		WeeklyFollowEnabled:   true,
+		Boundary:              &newBoundary,
+	}
+	if err := c.ApplyUserPlatformQuotaFollowReset(ctx, 7, "openai", result); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := c.GetUserPlatformQuotaCache(ctx, 7, "openai")
+	if err != nil || !ok {
+		t.Fatalf("get reset cache: ok=%v err=%v", ok, err)
+	}
+	if got.DailyUsageUSD != 0 || got.WeeklyUsageUSD != 0 || got.MonthlyUsageUSD != 8 {
+		t.Fatalf("unexpected reset usages: %+v", got)
+	}
+	if !got.WeeklyFollowEnabled || got.WeeklyWindowStart == nil || !got.WeeklyWindowStart.Equal(newBoundary) ||
+		got.DailyFollowResetBoundary == nil || !got.DailyFollowResetBoundary.Equal(newBoundary) {
+		t.Fatalf("unexpected reset policy/boundaries: %+v", got)
+	}
+	if err := c.ApplyUserPlatformQuotaFollowReset(ctx, 7, "openai", result); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = c.GetUserPlatformQuotaCache(ctx, 7, "openai")
+	if got.Version != 4 {
+		t.Fatalf("same boundary must be idempotent, version=%d want=4", got.Version)
+	}
+}
+
 func TestUserPlatformQuotaCache_Delete(t *testing.T) {
 	c, _ := newMiniRedisCache(t)
 	ctx := context.Background()

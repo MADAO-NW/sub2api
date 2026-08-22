@@ -203,6 +203,14 @@ type SystemSettings struct {
 	ChannelMonitorHideThroughput         bool   `json:"channel_monitor_hide_throughput"`
 	ChannelMonitorShowQuota              bool   `json:"channel_monitor_show_quota"`
 
+	// 用户日/周限额跟随上游账号周重置。
+	UserQuotaFollowAccountResetEnabled            bool   `json:"user_quota_follow_account_reset_enabled"`
+	UserQuotaFollowAccountResetWeeklyEnabled      bool   `json:"user_quota_follow_account_reset_weekly_enabled"`
+	UserQuotaFollowAccountResetDailyEnabled       bool   `json:"user_quota_follow_account_reset_daily_enabled"`
+	UserQuotaFollowAccountResetMinIntervalMinutes int    `json:"user_quota_follow_account_reset_min_interval_minutes"`
+	UserQuotaFollowAccountResetMaxIntervalMinutes int    `json:"user_quota_follow_account_reset_max_interval_minutes"`
+	UserQuotaFollowAccountResetActivationAt       string `json:"-"`
+
 	// Grok model mapping policy (admin settings; empty mapping falls back to these).
 	GrokDefaultTextModel           string `json:"grok_default_text_model"`
 	GrokCrossClientModelMapEnabled bool   `json:"grok_cross_client_model_map_enabled"`
