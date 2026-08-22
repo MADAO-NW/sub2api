@@ -49,7 +49,7 @@ func (r *userQuotaFollowResetStore) ListProbeTargets(ctx context.Context) ([]ser
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	targets := make([]service.UserQuotaFollowProbeTarget, 0)
 	for rows.Next() {
 		var target service.UserQuotaFollowProbeTarget
@@ -401,7 +401,7 @@ func currentQuotaFollowGroupMembershipHash(ctx context.Context, client *dbent.Cl
 	if err != nil {
 		return "", false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	members := make([]service.UserQuotaFollowProbeTarget, 0)
 	for rows.Next() {
 		member := service.UserQuotaFollowProbeTarget{GroupID: groupID, Platform: platform}
@@ -429,7 +429,7 @@ func uniqueExclusiveGroupForUser(ctx context.Context, client *dbent.Client, user
 	if err != nil {
 		return 0, time.Time{}, false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var groupID int64
 	var groupPlatform string
 	var boundAt time.Time
@@ -458,7 +458,7 @@ func scanQuotaFollowRow(ctx context.Context, client *dbent.Client, query string,
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return err
