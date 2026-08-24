@@ -175,7 +175,7 @@ func TestPromptAuditPersistsAndReusesThirdPartySegmentResultsPerEndpoint(t *test
 	sourceResult.ModelResults.Models = []ModelAuditResult{{Sequence: 1, EndpointID: endpoint.ID, Adapter: endpoint.Adapter, Model: endpoint.Model}}
 	sourceResult.ModelResults.NewSegmentResults = []SegmentAuditResult{{
 		ReuseKey: key, SourceRole: segment.SourceRole, Model: endpoint.Model,
-		Decision: EventPass, Action: ActionAllow, Categories: []string{},
+		Decision: EventPass, Action: ActionAllow, Categories: nil,
 	}}
 	sourceResult.ModelResults.SegmentUses = []SegmentResultUse{{
 		EndpointID: endpoint.ID, SegmentOrder: segment.Order, SourceRole: segment.SourceRole,
@@ -189,6 +189,7 @@ func TestPromptAuditPersistsAndReusesThirdPartySegmentResultsPerEndpoint(t *test
 	require.NoError(t, err)
 	require.Contains(t, found, key.LookupKey)
 	require.NotZero(t, found[key.LookupKey].ID)
+	require.Empty(t, found[key.LookupKey].Categories)
 
 	currentSnapshot := integrationSnapshot("segment-current")
 	currentSnapshot.PromptHash = strings.Repeat("x", 64)

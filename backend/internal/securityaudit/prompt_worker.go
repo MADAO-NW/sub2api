@@ -241,7 +241,13 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 	}))
 	completion, err := r.repo.Complete(ctx, job, aggregated, cfg)
 	if err != nil {
-		return err
+		if errors.Is(err, ErrLeaseLost) {
+			return err
+		}
+		return r.finishFailure(ctx, job, &GuardError{
+			Code: ErrorCodeUnavailable, DetailCode: "result_record_failed", Retryable: true, Cause: err,
+			Attempts: append([]ModelCallAttempt(nil), aggregated.ModelResults.FailedAttempts...),
+		})
 	}
 	var event *Event
 	if completion != nil {

@@ -451,6 +451,30 @@ func TestWorkerCompletesPassWithoutEventRefreshesBeforeModelAndDeletesPayload(t 
 	require.Equal(t, int64(1), metrics.Snapshot().Allowed)
 }
 
+func TestWorkerRetriesResultPersistenceFailure(t *testing.T) {
+	repo := &fakeJobRepository{completeErr: errors.New("result persistence failed")}
+	payload := &fakePayloadStore{values: map[int64]string{51: "abcdef"}}
+	runner := NewRunner(
+		&fakeConfigStore{cfg: asyncConfig(), active: true},
+		repo,
+		payload,
+		PromptScannerFunc(func(_ context.Context, endpoint ActiveEndpoint, _ string, _ []string) (*NormalizedResult, error) {
+			return &NormalizedResult{
+				Decision: EventPass, RiskLevel: RiskLow, Action: ActionAllow, Safety: "Safe",
+				GuardEndpointID: endpoint.ID,
+			}, nil
+		}),
+		NewAtomicMetrics(),
+	)
+	runner.clock = fixedClock{now: time.Unix(100, 0).UTC()}
+
+	err := runner.processJob(context.Background(), 0, asyncConfig(), workerJob(1, 3))
+	require.Error(t, err)
+	require.Equal(t, 1, repo.retried)
+	require.Equal(t, "result_record_failed", repo.retryCode)
+	require.Empty(t, payload.deleted)
+}
+
 func TestWorkerReusesHistoricalResultWithoutCallingModel(t *testing.T) {
 	sourceOutcomeID := int64(88)
 	historical := integrationResult(EventCritical)

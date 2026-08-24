@@ -22,7 +22,8 @@ const (
 
 	DefaultGuardModel = "sileader/qwen3guard:0.6b"
 
-	EvaluationContractVersion = "qwen-whole-thirdparty-role-v1"
+	// EvaluationContractVersion 隔离角色分段、最终任务意图裁决和模型聚合语义不同的历史结果。
+	EvaluationContractVersion = "qwen-whole-thirdparty-role-v2"
 )
 
 type Mode string

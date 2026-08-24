@@ -147,7 +147,7 @@ func insertSegmentResults(
 			LookupKey: key.LookupKey, EndpointID: key.EndpointID, Adapter: key.Adapter, Model: result.Model,
 			SourceRole: result.SourceRole, PolicyRole: key.PolicyRole, TurnScope: key.TurnScope,
 			ContentHash: key.ContentHash, Decision: result.Decision, Action: result.Action,
-			Categories: append([]string(nil), result.Categories...), ConfigVersion: key.ConfigVersion,
+			Categories: append([]string{}, result.Categories...), ConfigVersion: key.ConfigVersion,
 			AuditPromptHash: key.AuditPromptHash, RolePromptHash: key.RolePromptHash,
 			EvaluationContractVersion: key.EvaluationContractVersion,
 			PromptContractVersion:     key.PromptContractVersion,
