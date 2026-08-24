@@ -227,31 +227,28 @@ func evaluateThirdPartyEndpoint(
 	}
 
 	allPass := true
-	directCritical := false
-	directCategories := map[string]struct{}{}
 	jointSegments := make([]AuditSegment, 0, len(segments))
 	jointTrigger := ""
 	for _, segment := range segments {
 		result := byOrder[segment.Order]
-		if result.Decision != EventPass || result.Action != ActionAllow {
+		nonPass := result.Decision != EventPass || result.Action != ActionAllow
+		if nonPass {
 			allPass = false
 		}
 		direct := segmentDirectlyAffectsTask(segment)
-		if direct && result.Decision == EventCritical && result.Action == ActionBlock {
-			directCritical = true
-			for _, category := range result.Categories {
-				directCategories[category] = struct{}{}
-			}
-		}
-		if direct || result.Decision != EventPass || result.Action != ActionAllow {
+		if direct || nonPass {
 			jointSegments = append(jointSegments, segment)
 		}
-		if direct && result.Decision == EventFlag {
-			jointTrigger = "direct_flag"
-		} else if !direct && result.Decision != EventPass && jointTrigger == "" {
+		if direct && nonPass {
+			if result.Decision == EventCritical {
+				jointTrigger = "direct_critical"
+			} else if jointTrigger != "direct_critical" {
+				jointTrigger = "direct_flag"
+			}
+		} else if !direct && nonPass && jointTrigger == "" {
 			jointTrigger = "context_risk"
 		}
-		if direct || result.Decision != EventPass || result.Action != ActionAllow {
+		if direct || nonPass {
 			evaluation.Uses = append(evaluation.Uses, SegmentResultUse{
 				EndpointID: endpoint.ID, SegmentOrder: segment.Order, SourceRole: segment.SourceRole,
 				PolicyRole: segment.PolicyRole, TurnScope: segment.TurnScope, LookupKey: result.ReuseKey.LookupKey,
@@ -263,8 +260,6 @@ func evaluateThirdPartyEndpoint(
 	switch {
 	case allPass:
 		evaluation.Result = normalizedEndpointResult(endpoint.ID, EventPass, ActionAllow, nil)
-	case directCritical:
-		evaluation.Result = normalizedEndpointResult(endpoint.ID, EventCritical, ActionBlock, orderedScannerKeys(directCategories))
 	default:
 		evaluation.JointCalls = 1
 		evaluation.Joint = &ModelJointEvaluation{Executed: true, Trigger: jointTrigger}

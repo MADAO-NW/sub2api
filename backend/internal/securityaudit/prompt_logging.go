@@ -194,6 +194,8 @@ func stableErrorMessage(code string) string {
 		return "Prompt Audit queue is unavailable"
 	case "worker_panic":
 		return "Prompt Audit worker failed"
+	case "result_record_failed":
+		return "Prompt Audit result could not be persisted"
 	case "config_load_failed", "config_ttl_reload_failed", "config_invalidation_reload_failed":
 		return "Prompt Audit configuration could not be loaded"
 	default:
