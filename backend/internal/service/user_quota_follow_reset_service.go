@@ -125,7 +125,7 @@ func (s *UserQuotaFollowResetService) runLoop() {
 	for {
 		settings, err := s.settingService.LoadUserQuotaFollowResetRuntimeSettings(s.ctx)
 		if err != nil {
-			slog.Warn("user_quota_follow_reset_settings_load_failed", "error", err)
+			slog.Warn("用户额度跟随账号重置：读取运行设置失败", "error", err)
 			settings = defaultUserQuotaFollowResetRuntimeSettings()
 		}
 		wait := userQuotaFollowResetDisabledPollInterval
@@ -140,7 +140,7 @@ func (s *UserQuotaFollowResetService) runLoop() {
 		case <-timer.C:
 		}
 		if err := s.RunOnce(s.ctx); err != nil {
-			slog.Warn("user_quota_follow_reset_probe_failed", "error", err)
+			slog.Warn("用户额度跟随账号重置：检测任务执行失败", "error", err)
 		}
 	}
 }
@@ -185,23 +185,36 @@ func (s *UserQuotaFollowResetService) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list user quota follow reset targets: %w", err)
 	}
+	slog.Info("用户额度跟随账号重置：开始检测 OpenAI 账号",
+		"activation_at", settings.ActivationAt,
+		"account_count", len(targets),
+	)
 	accountIDs := make([]int64, 0, len(targets))
 	for _, target := range targets {
 		accountIDs = append(accountIDs, target.AccountID)
 	}
-	usageByAccount, _, err := s.usageService.GetUsageBatch(ctx, accountIDs, true)
+	usageByAccount, errorsByAccount, err := s.usageService.GetUsageBatch(ctx, accountIDs, true)
 	if err != nil {
 		return fmt.Errorf("probe account weekly usage: %w", err)
+	}
+	for accountID, probeError := range errorsByAccount {
+		slog.Warn("用户额度跟随账号重置：获取账号官方周窗口失败",
+			"account_id", accountID,
+			"error", probeError,
+		)
 	}
 	observations := make(map[int64]UserQuotaFollowAccountObservation, len(usageByAccount))
 	for _, target := range targets {
 		usage := usageByAccount[target.AccountID]
 		if usage == nil || usage.SevenDay == nil {
+			slog.Info("用户额度跟随账号重置：账号未返回官方周窗口，本轮跳过",
+				"account_id", target.AccountID,
+				"platform", target.Platform,
+			)
 			continue
 		}
 		observations[target.AccountID] = UserQuotaFollowAccountObservation{
 			AccountID:   target.AccountID,
-			GroupID:     target.GroupID,
 			Platform:    target.Platform,
 			Utilization: usage.SevenDay.Utilization,
 			ResetsAt:    usage.SevenDay.ResetsAt,
@@ -210,6 +223,11 @@ func (s *UserQuotaFollowResetService) RunOnce(ctx context.Context) error {
 	if err := s.store.RecordProbeObservations(ctx, settings.ActivationAt, targets, observations, time.Now().UTC()); err != nil {
 		return fmt.Errorf("record account weekly usage observations: %w", err)
 	}
+	slog.Info("用户额度跟随账号重置：OpenAI 账号检测完成",
+		"account_count", len(targets),
+		"observed_count", len(observations),
+		"failed_count", len(errorsByAccount),
+	)
 	return nil
 }
 
@@ -250,7 +268,7 @@ func (s *UserQuotaFollowResetService) ApplyUserQuotaReset(
 				return result, nil
 			}
 		} else if err := cacheUpdater.ApplyUserPlatformQuotaFollowReset(ctx, userID, platform, result); err != nil {
-			slog.Warn("user_quota_follow_reset_cache_apply_failed", "user_id", userID, "platform", platform, "error", err)
+			slog.Warn("用户额度跟随账号重置：更新 Redis 额度状态失败", "user_id", userID, "platform", platform, "error", err)
 			// Redis 脚本异常时删除旧快照，确保本次资格检查回源读取已提交的 DB 状态。
 			_ = s.cache.DeleteUserPlatformQuotaCache(ctx, userID, platform)
 			return result, nil

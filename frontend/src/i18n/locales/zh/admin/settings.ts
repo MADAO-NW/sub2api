@@ -15,13 +15,13 @@ export default {
       },
       features: {
         userQuotaFollowReset: {
-          title: '用户日/周限额跟随账号重置',
-          description: '按用户唯一专属分组和平台检测上游账号的周重置；同组多账号必须全部完成重置且时间误差不超过 5 分钟。默认关闭。',
+          title: '用户日/周限额跟随 OpenAI 账号重置',
+          description: '用户与唯一一个有效 OpenAI 账号存在显式共享分组且已建立官方周窗口基线时，按勾选范围跟随重置。不要求专属分组；存在多个 OpenAI 账号时恢复原有规则。默认关闭。',
           enabled: '启用跟随重置',
           enabledHint: '关闭后恢复原有规则：周限额固定按周一重置，日限额仍按自然日重置。',
           resetWeekly: '重置周限额',
           resetDaily: '重置日限额',
-          scopeHint: '只执行勾选的重置项；两项都不勾选时不会主动检测账号。',
+          scopeHint: '只执行勾选的重置项；首次检测只建立基线，两项都不勾选时不会主动检测账号。',
           minInterval: '随机检测间隔下限（分钟）',
           maxInterval: '随机检测间隔上限（分钟）',
           intervalHint: '每次检测完成后，在上下限之间重新随机等待；默认 10–15 分钟。',

@@ -29,23 +29,20 @@ type UserPlatformQuotaFollowResetCache interface {
 
 // UserQuotaFollowProbeTarget 是后台账号检测任务的稳定输入。
 type UserQuotaFollowProbeTarget struct {
-	AccountID       int64
-	GroupID         int64
-	Platform        string
-	AccountType     string
-	MembershipSince time.Time
+	AccountID   int64
+	Platform    string
+	AccountType string
 }
 
 // UserQuotaFollowAccountObservation 是一次上游周配额观测。
 type UserQuotaFollowAccountObservation struct {
 	AccountID   int64
-	GroupID     int64
 	Platform    string
 	Utilization float64
 	ResetsAt    *time.Time
 }
 
-// UserQuotaFollowResetStore 持久化账号探测快照、分组确认事件并原子应用用户窗口。
+// UserQuotaFollowResetStore 持久化 OpenAI 账号探测快照并原子应用用户窗口。
 type UserQuotaFollowResetStore interface {
 	ListProbeTargets(ctx context.Context) ([]UserQuotaFollowProbeTarget, error)
 	RecordProbeObservations(ctx context.Context, activationAt time.Time, targets []UserQuotaFollowProbeTarget, observations map[int64]UserQuotaFollowAccountObservation, observedAt time.Time) error
