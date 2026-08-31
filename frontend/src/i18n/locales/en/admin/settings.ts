@@ -15,13 +15,13 @@ export default {
       },
       features: {
         userQuotaFollowReset: {
-          title: 'Follow Account Resets for User Quotas',
-          description: 'Detect upstream weekly resets by the user’s single exclusive group and platform. Every account in a multi-account group must reset within a five-minute span. Disabled by default.',
+          title: 'Follow OpenAI Account Resets for User Quotas',
+          description: 'When a user explicitly shares any active group with exactly one active OpenAI account and its official weekly baseline is ready, reset the selected quotas with that account. Exclusive groups are not required; multiple OpenAI accounts fall back to the original rules. Disabled by default.',
           enabled: 'Enable follow reset',
           enabledHint: 'When disabled, weekly quotas return to Monday resets and daily quotas keep their normal calendar-day resets.',
           resetWeekly: 'Reset weekly quota',
           resetDaily: 'Reset daily quota',
-          scopeHint: 'Only selected quotas are reset. With neither selected, no proactive account probes run.',
+          scopeHint: 'Only selected quotas are reset. The first probe only establishes a baseline; with neither selected, no proactive account probes run.',
           minInterval: 'Random probe minimum (minutes)',
           maxInterval: 'Random probe maximum (minutes)',
           intervalHint: 'After each probe, wait a newly randomized interval within this range. Default: 10–15 minutes.',
