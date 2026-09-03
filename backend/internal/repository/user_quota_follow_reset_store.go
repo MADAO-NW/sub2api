@@ -143,7 +143,9 @@ func detectQuotaFollowAccountReset(
 		detection.lastPercentageEventAt = sql.NullTime{}
 		return detection
 	}
-	if state.nextResetAt.Valid && observation.ResetsAt != nil && observation.ResetsAt.After(state.nextResetAt.Time) {
+	// resets_at 由采样时间和相对秒数换算，可能出现秒级向后抖动；旧边界实际到达后才能确认新周期。
+	if state.nextResetAt.Valid && observation.ResetsAt != nil &&
+		!observedAt.Before(state.nextResetAt.Time) && observation.ResetsAt.After(state.nextResetAt.Time) {
 		detection.detectedResetAt = sql.NullTime{Time: state.nextResetAt.Time, Valid: true}
 		detection.detectedResetSource = sql.NullString{String: quotaFollowResetAtSource, Valid: true}
 		detection.newEvent = true
@@ -301,7 +303,16 @@ func (r *userQuotaFollowResetStore) ApplyUserQuotaReset(
 			if match.nextResetAt.Valid {
 				result.NextResetAt = &match.nextResetAt.Time
 			}
-			if match.detectedResetAt.Valid && !match.detectedResetAt.Time.Before(match.boundAt) {
+			// 防御纵深：持久化异常或旧版本误判产生的未来边界不得清零用户额度。
+			if match.detectedResetAt.Valid && match.detectedResetAt.Time.After(now) {
+				slog.Warn("用户额度跟随账号重置：拒绝未来重置边界",
+					"user_id", userID,
+					"platform", platform,
+					"account_id", match.accountID,
+					"detected_reset_at", match.detectedResetAt.Time,
+					"now", now,
+				)
+			} else if match.detectedResetAt.Valid && !match.detectedResetAt.Time.Before(match.boundAt) {
 				result.Boundary = &match.detectedResetAt.Time
 				if settings.ResetWeeklyEnabled && (!weeklyStart.Valid || match.detectedResetAt.Time.After(weeklyStart.Time)) {
 					weeklyUsage = 0
