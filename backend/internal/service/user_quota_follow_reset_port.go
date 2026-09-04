@@ -7,14 +7,16 @@ import (
 
 // UserQuotaFollowResetApplyResult 描述本次请求前置处理实际推进的窗口。
 type UserQuotaFollowResetApplyResult struct {
-	Changed               bool
-	WeeklyReset           bool
-	DailyReset            bool
-	DailyBoundaryAdvanced bool
-	WeeklyFollowEnabled   bool
-	DailyFollowEnabled    bool
-	Boundary              *time.Time
-	NextResetAt           *time.Time
+	Changed                     bool
+	WeeklyReset                 bool
+	WeeklyWindowNormalized      bool
+	NormalizedWeeklyWindowStart *time.Time
+	DailyReset                  bool
+	DailyBoundaryAdvanced       bool
+	WeeklyFollowEnabled         bool
+	DailyFollowEnabled          bool
+	Boundary                    *time.Time
+	NextResetAt                 *time.Time
 }
 
 // UserQuotaFollowResetApplier 在计费资格检查前同步用户平台限额窗口。

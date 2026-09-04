@@ -527,6 +527,14 @@ if ARGV[6] == "1" and ARGV[5] ~= "" then
         changed = 1
     end
 end
+-- 无损归一化只替换普通周窗口起点，不修改任何 usage。
+if ARGV[9] == "1" and ARGV[10] ~= "" then
+    local previous = redis.call("HGET", KEYS[1], "weekly_window_start")
+    if previous == false or previous ~= ARGV[10] then
+        redis.call("HSET", KEYS[1], "weekly_window_start", ARGV[10])
+        changed = 1
+    end
+end
 if changed == 1 then
     redis.call("HINCRBY", KEYS[1], "version", 1)
     redis.call("SADD", KEYS[2], ARGV[7])
@@ -539,6 +547,10 @@ func (c *billingCache) ApplyUserPlatformQuotaFollowReset(ctx context.Context, us
 	boundary := ""
 	if result.Boundary != nil {
 		boundary = strconv.FormatInt(result.Boundary.Unix(), 10)
+	}
+	normalizedWeeklyStart := ""
+	if result.NormalizedWeeklyWindowStart != nil {
+		normalizedWeeklyStart = strconv.FormatInt(result.NormalizedWeeklyWindowStart.Unix(), 10)
 	}
 	boolArg := func(value bool) string {
 		if value {
@@ -556,6 +568,8 @@ func (c *billingCache) ApplyUserPlatformQuotaFollowReset(ctx context.Context, us
 		boolArg(result.WeeklyReset),
 		userPlatformQuotaDirtyMember(userID, platform),
 		userPlatformQuotaDirtyTTLSeconds,
+		boolArg(result.WeeklyWindowNormalized),
+		normalizedWeeklyStart,
 	).Result()
 	if errors.Is(err, redis.Nil) {
 		return nil
