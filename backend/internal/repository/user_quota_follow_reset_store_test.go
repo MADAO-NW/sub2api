@@ -190,6 +190,92 @@ func TestApplyUserQuotaResetFallsBackWhenMultipleOpenAIAccountsMatch(t *testing.
 	}
 }
 
+func TestApplyUserQuotaResetNormalizesFallbackWindowWithoutClearingUsage(t *testing.T) {
+	for _, storedWeeklyFollow := range []bool{true, false} {
+		name := "历史普通模式未来窗口"
+		if storedWeeklyFollow {
+			name = "关闭跟随模式"
+		}
+		t.Run(name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+			defer func() { _ = client.Close() }()
+			store := &userQuotaFollowResetStore{client: client}
+
+			now := time.Date(2026, 9, 3, 14, 0, 0, 0, time.UTC)
+			dailyStart := timezone.StartOfDay(now)
+			previousWeeklyStart := now.Add(4 * 24 * time.Hour)
+			if storedWeeklyFollow {
+				previousWeeklyStart = now.Add(-24 * time.Hour)
+			}
+			normalWeeklyStart := timezone.StartOfWeek(now)
+			mock.ExpectBegin()
+			mock.ExpectQuery("SELECT daily_usage_usd, weekly_usage_usd").
+				WithArgs(int64(41), service.PlatformOpenAI).
+				WillReturnRows(sqlmock.NewRows([]string{
+					"daily_usage_usd", "weekly_usage_usd", "daily_window_start", "weekly_window_start",
+					"daily_follow_reset_boundary", "weekly_follow_enabled", "updated_at",
+				}).AddRow(4.0, 123.45, dailyStart, previousWeeklyStart, nil, storedWeeklyFollow, now.Add(-time.Hour)))
+			mock.ExpectExec("UPDATE user_platform_quotas SET").
+				WithArgs(4.0, 123.45, normalWeeklyStart, nil, false, now, int64(41), service.PlatformOpenAI).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectCommit()
+
+			result, changed, err := store.ApplyUserQuotaReset(context.Background(), 41, service.PlatformOpenAI,
+				service.UserQuotaFollowResetRuntimeSettings{}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed || !result.WeeklyWindowNormalized || result.NormalizedWeeklyWindowStart == nil ||
+				!result.NormalizedWeeklyWindowStart.Equal(normalWeeklyStart) || result.WeeklyFollowEnabled || result.WeeklyReset {
+				t.Fatalf("未来周窗口应保留用量并归一化: changed=%t result=%+v", changed, result)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestApplyUserQuotaResetLeavesExpiredOrdinaryWindowForUsageReset(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	defer func() { _ = client.Close() }()
+	store := &userQuotaFollowResetStore{client: client}
+
+	now := time.Date(2026, 9, 3, 14, 0, 0, 0, time.UTC)
+	dailyStart := timezone.StartOfDay(now)
+	previousWeeklyStart := timezone.StartOfWeek(now).Add(-7 * 24 * time.Hour)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT daily_usage_usd, weekly_usage_usd").
+		WithArgs(int64(42), service.PlatformOpenAI).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"daily_usage_usd", "weekly_usage_usd", "daily_window_start", "weekly_window_start",
+			"daily_follow_reset_boundary", "weekly_follow_enabled", "updated_at",
+		}).AddRow(4.0, 123.45, dailyStart, previousWeeklyStart, nil, false, now.Add(-time.Hour)))
+	mock.ExpectCommit()
+
+	result, changed, err := store.ApplyUserQuotaReset(context.Background(), 42, service.PlatformOpenAI,
+		service.UserQuotaFollowResetRuntimeSettings{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || result.WeeklyWindowNormalized || result.WeeklyReset {
+		t.Fatalf("普通模式过期窗口应留给用量累加路径执行正常换周: changed=%t result=%+v", changed, result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyUserQuotaResetConsumesSingleAccountBoundary(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

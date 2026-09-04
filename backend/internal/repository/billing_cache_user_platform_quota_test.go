@@ -165,6 +165,52 @@ func TestUserPlatformQuotaCache_ApplyFollowResetAtomically(t *testing.T) {
 	}
 }
 
+func TestUserPlatformQuotaCache_NormalizeWeeklyWindowPreservesUsage(t *testing.T) {
+	c, _ := newMiniRedisCache(t)
+	ctx := context.Background()
+	futureStart := time.Date(2026, 9, 7, 2, 28, 33, 0, time.UTC)
+	normalStart := time.Date(2026, 8, 30, 16, 0, 0, 0, time.UTC)
+	if err := c.SetUserPlatformQuotaCache(ctx, 8, "openai", &service.UserPlatformQuotaCacheEntry{
+		DailyUsageUSD:       25,
+		WeeklyUsageUSD:      123.45,
+		MonthlyUsageUSD:     300,
+		Version:             4,
+		SchemaVersion:       service.UserPlatformQuotaCacheSchemaV1,
+		WeeklyWindowStart:   &futureStart,
+		WeeklyFollowEnabled: true,
+	}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	result := service.UserQuotaFollowResetApplyResult{
+		WeeklyWindowNormalized:      true,
+		NormalizedWeeklyWindowStart: &normalStart,
+		WeeklyFollowEnabled:         false,
+	}
+	if err := c.ApplyUserPlatformQuotaFollowReset(ctx, 8, "openai", result); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := c.GetUserPlatformQuotaCache(ctx, 8, "openai")
+	if err != nil || !ok {
+		t.Fatalf("get normalized cache: ok=%v err=%v", ok, err)
+	}
+	if got.DailyUsageUSD != 25 || got.WeeklyUsageUSD != 123.45 || got.MonthlyUsageUSD != 300 {
+		t.Fatalf("window normalization must preserve usage: %+v", got)
+	}
+	if got.WeeklyFollowEnabled || got.WeeklyWindowStart == nil || !got.WeeklyWindowStart.Equal(normalStart) {
+		t.Fatalf("unexpected normalized weekly policy: %+v", got)
+	}
+	if got.Version != 5 {
+		t.Fatalf("normalized cache version=%d want=5", got.Version)
+	}
+	if err := c.ApplyUserPlatformQuotaFollowReset(ctx, 8, "openai", result); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = c.GetUserPlatformQuotaCache(ctx, 8, "openai")
+	if got.WeeklyUsageUSD != 123.45 || got.Version != 5 {
+		t.Fatalf("same normalized window must be idempotent: %+v", got)
+	}
+}
+
 func TestUserPlatformQuotaCache_Delete(t *testing.T) {
 	c, _ := newMiniRedisCache(t)
 	ctx := context.Background()

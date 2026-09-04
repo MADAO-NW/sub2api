@@ -252,6 +252,8 @@ func (s *UserQuotaFollowResetService) ApplyUserQuotaReset(
 			result.Changed = false
 			result.DailyReset = false
 			result.WeeklyReset = false
+			result.WeeklyWindowNormalized = false
+			result.NormalizedWeeklyWindowStart = nil
 			result.DailyBoundaryAdvanced = false
 			return result, nil
 		}

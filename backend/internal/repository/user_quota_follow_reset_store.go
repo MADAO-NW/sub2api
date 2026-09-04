@@ -330,8 +330,23 @@ func (r *userQuotaFollowResetStore) ApplyUserQuotaReset(
 			}
 		}
 	}
+	// 从跟随模式退回普通周规则时，保留当前用量并把窗口归一化到本周一，
+	// 避免下一笔请求因跟随窗口与普通窗口不同而再次清零。已关闭模式中的未来窗口
+	// 只可能来自历史异常状态，也按相同方式无损修复。
+	if platform == service.PlatformOpenAI && !weeklyFollowEnabled {
+		normalWeeklyStart := timezone.StartOfWeek(now)
+		leavingFollowMode := storedWeeklyFollow &&
+			(!weeklyStart.Valid || !weeklyStart.Time.Equal(normalWeeklyStart))
+		hasHistoricalFutureWindow := weeklyStart.Valid && weeklyStart.Time.After(now)
+		if leavingFollowMode || hasHistoricalFutureWindow {
+			weeklyStart = sql.NullTime{Time: normalWeeklyStart, Valid: true}
+			result.WeeklyWindowNormalized = true
+			result.NormalizedWeeklyWindowStart = &normalWeeklyStart
+		}
+	}
 	result.WeeklyFollowEnabled = weeklyFollowEnabled
-	changed := storedWeeklyFollow != weeklyFollowEnabled || result.WeeklyReset || result.DailyBoundaryAdvanced
+	changed := storedWeeklyFollow != weeklyFollowEnabled || result.WeeklyReset ||
+		result.WeeklyWindowNormalized || result.DailyBoundaryAdvanced
 	if changed {
 		_, err = client.ExecContext(txCtx, `UPDATE user_platform_quotas SET
 			daily_usage_usd = $1, weekly_usage_usd = $2,
@@ -357,6 +372,7 @@ func (r *userQuotaFollowResetStore) ApplyUserQuotaReset(
 			"old_weekly_follow_enabled", storedWeeklyFollow,
 			"new_weekly_follow_enabled", weeklyFollowEnabled,
 			"weekly_reset", result.WeeklyReset,
+			"weekly_window_normalized", result.WeeklyWindowNormalized,
 			"daily_reset", result.DailyReset,
 			"old_updated_at", quotaUpdatedAt,
 			"new_updated_at", now,

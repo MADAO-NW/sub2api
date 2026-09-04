@@ -9,6 +9,7 @@ import (
 type quotaFollowStoreStub struct {
 	applyCalls int
 	changed    bool
+	result     UserQuotaFollowResetApplyResult
 }
 
 func (s *quotaFollowStoreStub) ListProbeTargets(context.Context) ([]UserQuotaFollowProbeTarget, error) {
@@ -21,7 +22,7 @@ func (s *quotaFollowStoreStub) RecordProbeObservations(context.Context, time.Tim
 
 func (s *quotaFollowStoreStub) ApplyUserQuotaReset(context.Context, int64, string, UserQuotaFollowResetRuntimeSettings, time.Time) (UserQuotaFollowResetApplyResult, bool, error) {
 	s.applyCalls++
-	return UserQuotaFollowResetApplyResult{}, s.changed, nil
+	return s.result, s.changed, nil
 }
 
 type quotaFollowCacheStub struct {
@@ -101,6 +102,36 @@ func TestUserQuotaFollowResetApplyMemoizesUntilNextProbe(t *testing.T) {
 	}
 	if store.applyCalls != 2 || cache.applyCalls != 2 {
 		t.Fatalf("new probe generation should reapply, store=%d cache=%d", store.applyCalls, cache.applyCalls)
+	}
+}
+
+func TestUserQuotaFollowResetNormalizedWindowUpdatesCacheOnce(t *testing.T) {
+	normalizedStart := time.Now().UTC().Truncate(time.Second)
+	settingService := &SettingService{}
+	store := &quotaFollowStoreStub{
+		changed: true,
+		result: UserQuotaFollowResetApplyResult{
+			WeeklyWindowNormalized:      true,
+			NormalizedWeeklyWindowStart: &normalizedStart,
+		},
+	}
+	cache := &quotaFollowCacheStub{}
+	service := &UserQuotaFollowResetService{store: store, settingService: settingService, cache: cache}
+
+	first, err := service.ApplyUserQuotaReset(context.Background(), 7, PlatformOpenAI, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.ApplyUserQuotaReset(context.Background(), 7, PlatformOpenAI, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Changed || !first.WeeklyWindowNormalized || first.NormalizedWeeklyWindowStart == nil ||
+		second.Changed || second.WeeklyWindowNormalized || second.NormalizedWeeklyWindowStart != nil {
+		t.Fatalf("窗口归一化只应在首次应用时生效: first=%+v second=%+v", first, second)
+	}
+	if store.applyCalls != 1 || cache.applyCalls != 1 {
+		t.Fatalf("窗口归一化应原子更新一次缓存: store=%d apply=%d", store.applyCalls, cache.applyCalls)
 	}
 }
 
